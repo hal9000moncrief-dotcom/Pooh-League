@@ -417,7 +417,7 @@ def main():
     sec_events = [e for e in events if is_sec_involved(e, sec_ids)]
 
     yyyy_mm_dd = f"{date_yyyymmdd[:4]}-{date_yyyymmdd[4:6]}-{date_yyyymmdd[6:]}"
-    output_dir = os.path.join(os.path.dirname(__file__), "..", "site")
+    output_dir = os.path.join(os.path.dirname(__file__), "..", "docs")
     os.makedirs(output_dir, exist_ok=True)
 
     out_xlsx = os.path.join(output_dir, f"Today_PoohPoints_SEC_ByOwner_{yyyy_mm_dd}.xlsx")
@@ -508,3 +508,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
