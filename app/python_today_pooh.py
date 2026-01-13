@@ -425,90 +425,91 @@ out_xlsx = os.path.join(OUTPUT_DIR, f"Today_PoohPoints_SEC_ByOwner_{yyyy_mm_dd}.
 out_players_html = os.path.join(OUTPUT_DIR, "today_players.html")
 out_owners_html  = os.path.join(OUTPUT_DIR, "today_owners.html")
 
+print(f"Found {len(sec_events)} SEC-involved games for {yyyy_mm_dd}\n")
 
-    print(f"Found {len(sec_events)} SEC-involved games for {yyyy_mm_dd}\n")
+all_rows = []
+for e in sec_events:
+    event_id = str(e.get("id") or "")
+    hdr = extract_event_header(e)
+    home = hdr["home"]
+    away = hdr["away"]
+    status_line = hdr["status"]
 
-    all_rows = []
-    for e in sec_events:
-        event_id = str(e.get("id") or "")
-        hdr = extract_event_header(e)
-        home = hdr["home"]
-        away = hdr["away"]
-        status_line = hdr["status"]
+    game_label = f"{away.get('abbr','')}@{home.get('abbr','')}"
+    print(f"{game_label} — {status_line} — (event {event_id})")
 
-        game_label = f"{away.get('abbr','')}@{home.get('abbr','')}"
-        print(f"{game_label} — {status_line} — (event {event_id})")
+    players = get_boxscore_players(event_id)
+    if not players:
+        print("  (No boxscore player stats published yet — try again later.)\n")
+        continue
 
-        players = get_boxscore_players(event_id)
-        if not players:
-            print("  (No boxscore player stats published yet — try again later.)\n")
-            continue
+    for p in players:
+        key = norm_name(p["player"])
+        info = draft_map.get(key)
+        if info:
+            owner = info["owner"]
+            started_today = "Yes" if info["started"] else "No"
+        else:
+            owner = "Undrafted"
+            started_today = "No"
 
-        for p in players:
-            key = norm_name(p["player"])
-            info = draft_map.get(key)
-            if info:
-                owner = info["owner"]
-                started_today = "Yes" if info["started"] else "No"
-            else:
-                owner = "Undrafted"
-                started_today = "No"
+        all_rows.append({
+            "date": yyyy_mm_dd,
+            "game": game_label,
+            "status": status_line,
+            "owner": owner,
+            "started_today": started_today,
+            "team": p["team"],
+            "player": p["player"],
+            "pooh": p["pooh"],
+            "pts": p["pts"],
+            "reb": p["reb"],
+            "ast": p["ast"],
+            "stl": p["stl"],
+            "blk": p["blk"],
+            "to":  p["to"],
+            "min": p["min"],
+        })
 
-            all_rows.append({
-                "date": yyyy_mm_dd,
-                "game": game_label,
-                "status": status_line,
-                "owner": owner,
-                "started_today": started_today,
-                "team": p["team"],
-                "player": p["player"],
-                "pooh": p["pooh"],
-                "pts": p["pts"],
-                "reb": p["reb"],
-                "ast": p["ast"],
-                "stl": p["stl"],
-                "blk": p["blk"],
-                "to":  p["to"],
-                "min": p["min"],
-            })
+    print(f"  Players captured: {len(players)}\n")
 
-        print(f"  Players captured: {len(players)}\n")
+# Players sheet sort: Owner (draft order), then starters first, then Pooh desc
+owner_rank = {o: i for i, o in enumerate(owner_order)}
 
-    # Players sheet sort: Owner (draft order), then starters first, then Pooh desc
-    owner_rank = {o: i for i, o in enumerate(owner_order)}
+def sort_key(r):
+    o = r["owner"]
+    oidx = owner_rank.get(o, 10_000 if o == "Undrafted" else 9_000)
+    starter_rank = 0 if r["started_today"] == "Yes" else 1
+    return (oidx, o, starter_rank, -r["pooh"], r["player"])
 
-    def sort_key(r):
-        o = r["owner"]
-        oidx = owner_rank.get(o, 10_000 if o == "Undrafted" else 9_000)
-        starter_rank = 0 if r["started_today"] == "Yes" else 1
-        return (oidx, o, starter_rank, -r["pooh"], r["player"])
+all_rows.sort(key=sort_key)
 
-    all_rows.sort(key=sort_key)
+# OwnerTotals: EXCLUDE Undrafted
+totals: Dict[str, Dict[str, int]] = {}
+for r in all_rows:
+    owner = r["owner"]
+    if owner == "Undrafted":
+        continue
 
-    # OwnerTotals: EXCLUDE Undrafted
-    totals: Dict[str, Dict[str, int]] = {}
-    for r in all_rows:
-        owner = r["owner"]
-        if owner == "Undrafted":
-            continue
+    if owner not in totals:
+        totals[owner] = {"starter_pooh_total": 0, "starters_count_so_far": 0}
 
-        if owner not in totals:
-            totals[owner] = {"starter_pooh_total": 0, "starters_count_so_far": 0}
+    if r["started_today"] == "Yes":
+        totals[owner]["starter_pooh_total"] += int(r["pooh"])
+        totals[owner]["starters_count_so_far"] += 1
 
-        if r["started_today"] == "Yes":
-            totals[owner]["starter_pooh_total"] += int(r["pooh"])
-            totals[owner]["starters_count_so_far"] += 1
+owner_totals_rows = [{"owner": o, **vals} for o, vals in totals.items()]
+owner_totals_rows.sort(key=lambda x: x["starter_pooh_total"], reverse=True)
 
-    owner_totals_rows = [{"owner": o, **vals} for o, vals in totals.items()]
-    owner_totals_rows.sort(key=lambda x: x["starter_pooh_total"], reverse=True)
-
-    write_xlsx(all_rows, owner_totals_rows, out_xlsx)
-    write_html_tables(all_rows, owner_totals_rows, out_players_html, out_owners_html, yyyy_mm_dd)
+write_xlsx(all_rows, owner_totals_rows, out_xlsx)
+write_html_tables(all_rows, owner_totals_rows, out_players_html, out_owners_html, yyyy_mm_dd)
 print(f"Wrote: {out_players_html}")
 print(f"Wrote: {out_owners_html}")
 print(f"Wrote: {out_xlsx}")
 
 
+
 if __name__ == "__main__":
     main()
+
 
