@@ -8,6 +8,7 @@ on:
         required: false
         default: ""
   schedule:
+    # Run every 5 minutes; window_check below restricts to CT windows
     - cron: "*/5 * * * *"
 
 permissions:
@@ -29,14 +30,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Manual runs should always proceed
+          # Manual runs should always proceed (date optional)
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             echo "Manual run: allowed."
             exit 0
           fi
 
-          # Scheduled runs: enforce CT windows
+          # Scheduled runs: enforce exact CT windows
           DAY="$(TZ=America/Chicago date +%u)"   # 1=Mon ... 7=Sun
           HM="$(TZ=America/Chicago date +%H%M)"  # HHMM
 
@@ -71,7 +72,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml openpyxl
 
-      - name: Run script
+      - name: Run script (writes outputs into docs/)
         if: github.event_name == 'workflow_dispatch' || steps.window_check.outputs.should_run == 'true'
         id: run_pooh
         shell: bash
@@ -88,7 +89,7 @@ jobs:
             python -u app/python_today_pooh.py | tee pooh_run.log
           fi
 
-          # Extract SEC game count
+          # Parse: "Found X SEC-involved games for YYYY-MM-DD"
           SEC_GAMES="$(grep -Eo 'Found [0-9]+ SEC-involved games' pooh_run.log | head -n 1 | awk '{print $2}' || true)"
           if [[ -z "${SEC_GAMES}" ]]; then
             SEC_GAMES="0"
@@ -97,19 +98,24 @@ jobs:
           echo "sec_games=${SEC_GAMES}" >> "$GITHUB_OUTPUT"
           echo "SEC games found: ${SEC_GAMES}"
 
-      - name: Commit updated site files (only if SEC games exist)
+      - name: Commit updated docs files (only if SEC games exist AND files changed)
         if: (github.event_name == 'workflow_dispatch' || steps.window_check.outputs.should_run == 'true') && steps.run_pooh.outputs.sec_games != '0'
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -z "$(git status --porcelain docs/)" ]]; then
+          git config user.name "pooh-bot"
+          git config user.email "pooh-bot@users.noreply.github.com"
+
+          # Stage as "intent to add" so git diff can detect changes even if files are new
+          git add -N docs/*.html docs/*.xlsx || true
+
+          # If nothing in docs/ actually changed, do NOT commit (prevents Pages deploy spam)
+          if git diff --quiet -- docs/; then
             echo "No changes in docs/. Nothing to commit."
             exit 0
           fi
 
-          git config user.name "pooh-bot"
-          git config user.email "pooh-bot@users.noreply.github.com"
           git add docs/*.html docs/*.xlsx || true
-          git commit -m "Update Pooh Points site" || echo "No changes to commit"
+          git commit -m "Update Pooh Points site"
           git push
