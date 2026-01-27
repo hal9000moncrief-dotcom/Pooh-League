@@ -4,12 +4,20 @@ on:
   workflow_dispatch:
     inputs:
       date_yyyymmdd:
-        description: "Game date (YYYYMMDD). Leave blank for today."
+        description: "Game date (YYYYMMDD). Leave blank for today (Normal only)."
         required: false
         default: ""
+      run_mode:
+        description: "Normal run uses today if date blank. Final run requires a date and saves Final_* snapshots."
+        required: true
+        type: choice
+        options:
+          - normal
+          - final
+        default: normal
 
   schedule:
-    # Every 10 minutes — safer than */5
+    # Every 10 minutes (cron is UTC)
     - cron: "*/10 * * * *"
 
 permissions:
@@ -33,20 +41,130 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml openpyxl
 
-      - name: Run Pooh Points script
+      - name: Resolve run parameters (Central time "today")
+        id: params
         shell: bash
         run: |
           set -euo pipefail
 
+          RUN_MODE="${{ github.event.inputs.run_mode || 'normal' }}"
           DATE_INPUT="${{ github.event.inputs.date_yyyymmdd || '' }}"
 
-          if [[ -n "$DATE_INPUT" ]]; then
-            echo "Running for date $DATE_INPUT"
-            python -u app/python_today_pooh.py "$DATE_INPUT"
+          # If no date provided, compute "today" in America/Chicago to avoid UTC rollover issues
+          if [[ -z "$DATE_INPUT" ]]; then
+            DATE_LOCAL="$(TZ='America/Chicago' date +%Y%m%d)"
           else
-            echo "Running for today"
-            python -u app/python_today_pooh.py
+            if [[ ! "$DATE_INPUT" =~ ^[0-9]{8}$ ]]; then
+              echo "ERROR: date_yyyymmdd must be YYYYMMDD (8 digits). Got: $DATE_INPUT"
+              exit 1
+            fi
+            DATE_LOCAL="$DATE_INPUT"
           fi
+
+          echo "run_mode=$RUN_MODE" >> "$GITHUB_OUTPUT"
+          echo "date_yyyymmdd=$DATE_LOCAL" >> "$GITHUB_OUTPUT"
+
+          echo "Run mode: $RUN_MODE"
+          echo "Effective date (America/Chicago when blank): $DATE_LOCAL"
+
+      - name: Validate Final Run date maps to a Play Date (PDx)
+        if: ${{ steps.params.outputs.run_mode == 'final' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Final Run requires an explicit typed date (not blank)
+          if [[ "${{ github.event.inputs.date_yyyymmdd || '' }}" == "" ]]; then
+            echo "ERROR: Final Run requires you to type a date (YYYYMMDD)."
+            exit 1
+          fi
+
+          if [[ ! -f "app/PD.xlsx" ]]; then
+            echo "ERROR: app/PD.xlsx not found. Drop PD.xlsx into the app/ folder."
+            exit 1
+          fi
+
+          python - << 'PY'
+          import re
+          from openpyxl import load_workbook
+
+          yyyymmdd = "${{ steps.params.outputs.date_yyyymmdd }}".strip()
+
+          if not re.fullmatch(r"\d{8}", yyyymmdd):
+            raise SystemExit(f"ERROR: date must be YYYYMMDD (8 digits). Got: {yyyymmdd}")
+
+          # Convert YYYYMMDD -> MMDDYYYY to match your PD.xlsx
+          yyyy = yyyymmdd[0:4]
+          mm   = yyyymmdd[4:6]
+          dd   = yyyymmdd[6:8]
+          mmddyyyy = f"{mm}{dd}{yyyy}"
+
+          wb = load_workbook("app/PD.xlsx", data_only=True)
+          ws = wb.active
+
+          # Your sheet is 2 columns, no headers:
+          # Col A = MMDDYYYY, Col B = play date number (1..19)
+          found = None
+          for row in ws.iter_rows(values_only=True):
+            if not row or row[0] is None:
+              continue
+            left = str(row[0]).strip()
+            m = re.match(r"^(\d{8})(?:\.0)?$", left)
+            if m:
+              left = m.group(1)
+
+            if left == mmddyyyy:
+              found = row[1]
+              break
+
+          if found is None:
+            raise SystemExit(
+              f"ERROR: Date {yyyymmdd} (MMDDYYYY={mmddyyyy}) does not correspond to a Play Date in app/PD.xlsx. Aborting Final Run."
+            )
+
+          pdnum = str(found).strip().replace(".0", "")
+          if not pdnum.isdigit():
+            raise SystemExit(f"ERROR: PD value for {mmddyyyy} is not numeric: {found}")
+
+          pd = f"PD{int(pdnum)}"
+          print(f"Resolved date {yyyymmdd} -> {mmddyyyy} -> {pd}")
+
+          with open("pd_resolved.txt", "w", encoding="utf-8") as f:
+            f.write(pd)
+          PY
+
+      - name: Run Pooh Points script
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATE_LOCAL="${{ steps.params.outputs.date_yyyymmdd }}"
+          echo "Running script for date $DATE_LOCAL"
+          python -u app/python_today_pooh.py "$DATE_LOCAL"
+
+      - name: If Final Run, create Final_* copies for that PD
+        if: ${{ steps.params.outputs.run_mode == 'final' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PD="$(cat pd_resolved.txt)"
+          echo "Creating Final_* copies for $PD from today_*.html"
+
+          if [[ ! -f "docs/today_players.html" ]]; then
+            echo "ERROR: Missing docs/today_players.html"
+            exit 1
+          fi
+          if [[ ! -f "docs/today_owners.html" ]]; then
+            echo "ERROR: Missing docs/today_owners.html"
+            exit 1
+          fi
+
+          cp -f "docs/today_players.html" "docs/Final_Players_${PD}.html"
+          cp -f "docs/today_owners.html"  "docs/Final_Owners_${PD}.html"
+
+          echo "Created:"
+          echo "  docs/Final_Players_${PD}.html"
+          echo "  docs/Final_Owners_${PD}.html"
 
       - name: Commit site updates if changed
         shell: bash
