@@ -7,10 +7,18 @@ import os
 import html
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
+
 from bs4 import BeautifulSoup
 from openpyxl import load_workbook, Workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, Alignment
+
+# Use Central time when running "today" without args
+try:
+    from zoneinfo import ZoneInfo  # py3.9+
+    CHICAGO_TZ = ZoneInfo("America/Chicago")
+except Exception:
+    CHICAGO_TZ = None  # fallback (shouldn't happen on py3.12)
 
 BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball"
 SEC_TEAMS_HTML = "https://www.espn.com/mens-college-basketball/teams/_/group/23"
@@ -158,11 +166,23 @@ def compute_pooh(values: List[str], labels: List[str]) -> Optional[dict]:
         "POOH": pooh,
     }
 
-def parse_yyyymmdd(s: str) -> datetime:
+def parse_date_arg_to_dt(s: str) -> datetime:
+    """
+    Accept either:
+      - YYYYMMDD (preferred)
+      - MMDDYYYY (your PD.xlsx format)
+    Return a naive datetime corresponding to local date (midnight).
+    """
     s = (s or "").strip()
     if not re.fullmatch(r"\d{8}", s):
-        raise ValueError("Date must be YYYYMMDD (8 digits).")
-    return datetime.strptime(s, "%Y%m%d")
+        raise ValueError("Date must be 8 digits. Use YYYYMMDD (preferred) or MMDDYYYY.")
+
+    # If it starts with 19xx/20xx, assume YYYYMMDD
+    if s.startswith("19") or s.startswith("20"):
+        return datetime.strptime(s, "%Y%m%d")
+
+    # Otherwise assume MMDDYYYY
+    return datetime.strptime(s, "%m%d%Y")
 
 def fmt_yyyymmdd(dt: datetime) -> str:
     return dt.strftime("%Y%m%d")
@@ -419,11 +439,14 @@ def write_html_tables(players_rows, owner_totals_rows, out_players_html, out_own
 # MAIN
 # ----------------------------
 def main():
-    # Primary date: from arg or today. Always also include previous day.
+    # Primary date: from arg or "today" in America/Chicago. Always also include previous day.
     if len(sys.argv) >= 2 and sys.argv[1].strip():
-        primary_dt = parse_yyyymmdd(sys.argv[1].strip())
+        primary_dt = parse_date_arg_to_dt(sys.argv[1].strip())
     else:
-        primary_dt = datetime.now()
+        if CHICAGO_TZ:
+            primary_dt = datetime.now(CHICAGO_TZ).replace(tzinfo=None)
+        else:
+            primary_dt = datetime.now()
 
     prev_dt = primary_dt - timedelta(days=1)
 
