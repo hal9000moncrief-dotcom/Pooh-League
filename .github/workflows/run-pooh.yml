@@ -216,7 +216,11 @@ jobs:
         run: |
           set -euo pipefail
           python -u app/build_summary_to_date.py
-          
+            
+      - name: Build Player Pooh Summary (Finals only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_type == 'final' }}
+        run: python -u app/build_player_pooh_summary.py
+    
       - name: Build Schedule page (HTML)
         shell: bash
         run: |
