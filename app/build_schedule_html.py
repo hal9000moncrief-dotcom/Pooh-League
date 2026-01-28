@@ -232,11 +232,13 @@ def main():
         f.write("<title>Schedule</title>")
         f.write(
             "<style>"
+            "html,body{margin:0;padding:0}"
             "body{font-family:Calibri,Arial;background:#ffffff}"
-            ".wrap{width:1400px;margin:20px auto;border:3px solid #000;background:#FFFFCC;padding:12px}"
+            ".wrap{max-width:98vw;margin:10px auto;border:3px solid #000;background:#FFFFCC;padding:10px;box-sizing:border-box}"
             "h1{margin:0 0 10px 0;text-align:center;background:#C0C0C0;border:1px solid #000;padding:10px}"
-            "table{border-collapse:collapse;width:100%;background:#ffffff}"
-            "td,th{border:1px solid #000;padding:6px 8px;font-size:12pt;white-space:nowrap}"
+            "table{border-collapse:collapse;width:100%;table-layout:fixed;background:#ffffff}"
+            "td,th{border:1px solid #000;padding:4px 6px;font-size:10pt;line-height:1.15;"
+            "white-space:normal;word-break:break-word;overflow-wrap:anywhere}"
             "</style>"
         )
         f.write("</head><body><div class='wrap'>")
