@@ -8,20 +8,16 @@ import html
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup  # still used elsewhere? safe to keep
 from openpyxl import load_workbook, Workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, Alignment
 
-# Use Central time when running "today" without args
-try:
-    from zoneinfo import ZoneInfo  # py3.9+
-    CHICAGO_TZ = ZoneInfo("America/Chicago")
-except Exception:
-    CHICAGO_TZ = None  # fallback (shouldn't happen on py3.12)
+# Python 3.9+ (you are on 3.12 in Actions)
+from zoneinfo import ZoneInfo
+
 
 BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball"
-SEC_TEAMS_HTML = "https://www.espn.com/mens-college-basketball/teams/_/group/23"
 
 DRAFT_XLSX = os.path.join(os.path.dirname(__file__), "ByCoach.xlsx")   # must be in same folder
 
@@ -40,6 +36,8 @@ BASE_DELAY = 0.25
 JITTER = 0.25
 MAX_RETRIES = 6
 TIMEOUT = 30
+
+LOCAL_TZ = ZoneInfo("America/Chicago")
 
 
 # ----------------------------
@@ -166,23 +164,13 @@ def compute_pooh(values: List[str], labels: List[str]) -> Optional[dict]:
         "POOH": pooh,
     }
 
-def parse_date_arg_to_dt(s: str) -> datetime:
-    """
-    Accept either:
-      - YYYYMMDD (preferred)
-      - MMDDYYYY (your PD.xlsx format)
-    Return a naive datetime corresponding to local date (midnight).
-    """
+def parse_yyyymmdd(s: str) -> datetime:
     s = (s or "").strip()
     if not re.fullmatch(r"\d{8}", s):
-        raise ValueError("Date must be 8 digits. Use YYYYMMDD (preferred) or MMDDYYYY.")
-
-    # If it starts with 19xx/20xx, assume YYYYMMDD
-    if s.startswith("19") or s.startswith("20"):
-        return datetime.strptime(s, "%Y%m%d")
-
-    # Otherwise assume MMDDYYYY
-    return datetime.strptime(s, "%m%d%Y")
+        raise ValueError("Date must be YYYYMMDD (8 digits).")
+    # Interpret as local date at midnight (America/Chicago) to avoid UTC rollover issues
+    dt = datetime.strptime(s, "%Y%m%d")
+    return dt.replace(tzinfo=LOCAL_TZ)
 
 def fmt_yyyymmdd(dt: datetime) -> str:
     return dt.strftime("%Y%m%d")
@@ -239,25 +227,13 @@ def load_draft_board(xlsx_path: str) -> Tuple[Dict[str, dict], List[str]]:
 
 
 # ----------------------------
-# SEC + SCOREBOARD
+# SCOREBOARD (SEC DIRECT)
 # ----------------------------
-def get_sec_team_ids() -> set:
-    html_txt = get_text(SEC_TEAMS_HTML)
-    soup = BeautifulSoup(html_txt, "lxml")
-    team_ids = set()
-    for a in soup.select('a[href*="/mens-college-basketball/team/_/id/"]'):
-        href = a.get("href", "")
-        m = re.search(r"/id/(\d+)", href)
-        if m:
-            team_ids.add(m.group(1))
-    if len(team_ids) != 16:
-        print(f"WARNING: SEC team IDs parsed = {len(team_ids)} (expected 16)")
-    return team_ids
-
-def get_today_events(date_yyyymmdd: str) -> List[dict]:
-    url = f"{BASE}/scoreboard?dates={date_yyyymmdd}&groups=50&limit=500"
+def get_sec_events(date_yyyymmdd: str) -> List[dict]:
+    # SEC = group 23 (matches ESPN SEC pages)
+    url = f"{BASE}/scoreboard?dates={date_yyyymmdd}&groups=23&limit=500"
     data = get_json(url)
-    return data.get("events", [])
+    return data.get("events", []) or []
 
 def extract_event_header(e: dict) -> dict:
     comps = e.get("competitions") or []
@@ -280,10 +256,6 @@ def extract_event_header(e: dict) -> dict:
         }
 
     return {"status": detail, "home": ha.get("home", {}), "away": ha.get("away", {})}
-
-def is_sec_involved(event_obj: dict, sec_ids: set) -> bool:
-    hdr = extract_event_header(event_obj)
-    return (hdr["home"].get("id", "") in sec_ids) or (hdr["away"].get("id", "") in sec_ids)
 
 
 # ----------------------------
@@ -441,12 +413,9 @@ def write_html_tables(players_rows, owner_totals_rows, out_players_html, out_own
 def main():
     # Primary date: from arg or "today" in America/Chicago. Always also include previous day.
     if len(sys.argv) >= 2 and sys.argv[1].strip():
-        primary_dt = parse_date_arg_to_dt(sys.argv[1].strip())
+        primary_dt = parse_yyyymmdd(sys.argv[1].strip())
     else:
-        if CHICAGO_TZ:
-            primary_dt = datetime.now(CHICAGO_TZ).replace(tzinfo=None)
-        else:
-            primary_dt = datetime.now()
+        primary_dt = datetime.now(LOCAL_TZ)
 
     prev_dt = primary_dt - timedelta(days=1)
 
@@ -459,15 +428,14 @@ def main():
     # Title string for pages: show range
     title_str = f"{prev_label} + {primary_label}"
 
+    print(f"Local now (America/Chicago): {datetime.now(LOCAL_TZ).isoformat()}")
+    print(f"Querying SEC scoreboard dates: {prev_yyyymmdd} and {primary_yyyymmdd}")
+
     draft_map, owner_order = load_draft_board(DRAFT_XLSX)
-    sec_ids = get_sec_team_ids()
 
-    # Fetch events for both dates
-    events_primary = get_today_events(primary_yyyymmdd)
-    events_prev = get_today_events(prev_yyyymmdd)
-
-    sec_events_primary = [e for e in events_primary if is_sec_involved(e, sec_ids)]
-    sec_events_prev = [e for e in events_prev if is_sec_involved(e, sec_ids)]
+    # Fetch SEC events for both dates (no HTML scraping)
+    sec_events_prev = get_sec_events(prev_yyyymmdd)
+    sec_events_primary = get_sec_events(primary_yyyymmdd)
 
     total_sec_events = len(sec_events_primary) + len(sec_events_prev)
 
@@ -479,7 +447,7 @@ def main():
     out_players_html = os.path.join(output_dir, "today_players.html")
     out_owners_html  = os.path.join(output_dir, "today_owners.html")
 
-    print(f"Found {total_sec_events} SEC-involved games for {title_str}\n")
+    print(f"Found {total_sec_events} SEC games for {title_str}\n")
 
     all_rows: List[dict] = []
 
@@ -546,7 +514,6 @@ def main():
         o = r["owner"]
         oidx = owner_rank.get(o, 10_000 if o == "Undrafted" else 9_000)
         starter_rank = 0 if r["started_today"] == "Yes" else 1
-        # include date so prev day comes first if owners/pooh tie
         return (oidx, o, r.get("date",""), starter_rank, -int(r.get("pooh", 0)), r.get("player",""))
 
     all_rows.sort(key=sort_key)
