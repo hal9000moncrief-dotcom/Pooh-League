@@ -112,10 +112,12 @@ jobs:
 
       - name: Run Pooh Points script
         shell: bash
+        env:
+          RUN_MODE: ${{ steps.params.outputs.run_mode }}
         run: |
           set -euo pipefail
           DATE_LOCAL="${{ steps.params.outputs.date_yyyymmdd }}"
-          echo "Running script for date $DATE_LOCAL"
+          echo "Running script for date $DATE_LOCAL (RUN_MODE=$RUN_MODE)"
           python -u app/python_today_pooh.py "$DATE_LOCAL"
 
       - name: Build Summary of Results to Date (Final runs only)
