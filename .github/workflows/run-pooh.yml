@@ -241,6 +241,9 @@ jobs:
 
       - name: Commit site updates if changed
         shell: bash
+        env:
+          RUN_MODE: ${{ steps.params.outputs.run_mode }}
+          RUN_DATE: ${{ steps.params.outputs.date_yyyymmdd }}
         run: |
           set -euo pipefail
 
@@ -253,11 +256,11 @@ jobs:
           git config user.email "pooh-bot@users.noreply.github.com"
           git add docs/
 
-          MSG="Pooh Points: ${{ steps.params.outputs.run_mode }} ${{ steps.params.outputs.date_yyyymmdd }}"
+          MSG="Pooh Points: ${RUN_MODE} ${RUN_DATE}"
           if [[ -f pd_resolved.txt ]]; then
-            MSG="$MSG -> $(cat pd_resolved.txt)"
+            MSG="${MSG} -> $(cat pd_resolved.txt)"
           fi
-          git commit -m "$MSG"
 
+          git commit -m "$MSG"
           git pull --rebase origin main
           git push
