@@ -140,7 +140,7 @@ jobs:
 
       # Guardrail: if any build step touched Final files, stop.
       # (This is what was corrupting PD7 with PD8 data.)
-      - name: Guard: Final_* must not change before snapshot
+      - name: "Guard: Final_* must not change before snapshot"
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
         run: |
@@ -152,7 +152,7 @@ jobs:
           fi
 
       # Snapshot copy MUST be last so nothing can overwrite it afterwards.
-      - name: If Final Run, create Final_* copies for that PD (LAST)
+      - name: "If Final Run, create Final_* copies for that PD (LAST)"
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
         run: |
