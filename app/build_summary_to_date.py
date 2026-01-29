@@ -6,7 +6,9 @@ from bs4 import BeautifulSoup
 
 DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "docs")
 
+
 def parse_cap_pd(argv) -> int | None:
+    # optional: PD7
     if len(argv) < 2:
         return None
     s = argv[1].strip().upper()
@@ -15,13 +17,15 @@ def parse_cap_pd(argv) -> int | None:
         raise SystemExit("Usage: python app/build_summary_to_date.py [PD7]")
     return int(m.group(1))
 
+
 def pd_num_from_filename(fn: str) -> int | None:
     m = re.search(r"Final_Owners_PD(\d+)\.html$", fn)
     return int(m.group(1)) if m else None
 
+
 def read_owner_totals_from_final_owners_html(path: str) -> dict[str, int]:
     """
-    Reads docs/Final_Owners_PDx.html which contains a table like:
+    Reads docs/Final_Owners_PDx.html table like:
       Owner | Starter Pooh Total | Starters Count So Far
     Returns {owner: starter_pooh_total}.
     """
@@ -35,7 +39,6 @@ def read_owner_totals_from_final_owners_html(path: str) -> dict[str, int]:
     rows = table.find_all("tr")
     out: dict[str, int] = {}
 
-    # skip header
     for tr in rows[1:]:
         tds = tr.find_all("td")
         if len(tds) < 2:
@@ -49,79 +52,126 @@ def read_owner_totals_from_final_owners_html(path: str) -> dict[str, int]:
 
     return out
 
+
 def main():
     cap_pd = parse_cap_pd(sys.argv)
 
-    # Collect Final_Owners_PD*.html in docs
-    files = []
+    # Find Final_Owners_PD*.html
+    pd_files: list[tuple[int, str]] = []
     for fn in os.listdir(DOCS_DIR):
         n = pd_num_from_filename(fn)
         if n is None:
             continue
         if cap_pd is not None and n > cap_pd:
             continue
-        files.append((n, fn))
+        pd_files.append((n, fn))
 
-    files.sort(key=lambda x: x[0])  # PD1..PDN
+    pd_files.sort(key=lambda x: x[0])  # PD1..PDN
 
-    # per_owner_per_pd[owner][pd] = starter_total_that_pd
+    if not pd_files:
+        raise SystemExit("No Final_Owners_PD*.html files found in docs/")
+
+    max_pd = pd_files[-1][0]
+
+    # per_owner_per_pd[owner][pd] = points for that PD
     per_owner_per_pd: dict[str, dict[int, int]] = defaultdict(dict)
     owners_set = set()
 
-    for pd, fn in files:
+    for pd, fn in pd_files:
         path = os.path.join(DOCS_DIR, fn)
         totals = read_owner_totals_from_final_owners_html(path)
-
-        # Important: Final_Owners_PDx.html is already "starter total for that day"
-        # (not cumulative), per your generation logic.
         for owner, v in totals.items():
             owners_set.add(owner)
             per_owner_per_pd[owner][pd] = int(v)
 
     owners = sorted(list(owners_set))
 
-    # Build totals and sort owners by total desc
-    owner_total = {o: sum(per_owner_per_pd[o].get(pd, 0) for pd, _ in files) for o in owners}
-    owners_sorted = sorted(owners, key=lambda o: owner_total.get(o, 0), reverse=True)
+    # Totals + avg
+    pd_list = [pd for pd, _ in pd_files]
+    completed_pd_count = len(pd_list)
 
-    # Output
+    owner_total: dict[str, int] = {}
+    owner_avg: dict[str, float] = {}
+
+    for owner in owners:
+        pd_scores = [per_owner_per_pd[owner].get(pd, 0) for pd in pd_list]
+        total = sum(pd_scores)
+        owner_total[owner] = total
+        owner_avg[owner] = (total / completed_pd_count) if completed_pd_count > 0 else 0.0
+
+    # Sort by Total Pooh descending
+    owners_sorted = sorted(owners, key=lambda o: (-owner_total.get(o, 0), o))
+
+    # Reference totals for Out Of 1st/2nd/3rd
+    top1 = owner_total.get(owners_sorted[0], 0) if len(owners_sorted) >= 1 else 0
+    top2 = owner_total.get(owners_sorted[1], top1) if len(owners_sorted) >= 2 else top1
+    top3 = owner_total.get(owners_sorted[2], top2) if len(owners_sorted) >= 3 else top2
+
+    # Write SummaryToDate.html with your headers
     out_path = os.path.join(DOCS_DIR, "SummaryToDate.html")
-    title = "Summary To Date"
-    if cap_pd is not None:
-        title += f" (through PD{cap_pd})"
 
     with open(out_path, "w", encoding="utf-8") as out:
         out.write("<!doctype html><html><head><meta charset='utf-8'>")
-        out.write(f"<title>{title}</title>")
+        out.write("<title>Sorted League Results</title>")
         out.write(
             "<style>"
             "body{font-family:Arial}"
             "table{border-collapse:collapse;font-size:14px}"
             "th,td{border:1px solid #ccc;padding:4px 6px}"
             "th{background:#eee}"
+            "td.num{text-align:right}"
             "</style>"
         )
         out.write("</head><body>")
-        out.write(f"<h2>{title}</h2>")
+        out.write("<h2 style='text-align:center'>Sorted League Results</h2>")
 
-        # Header: Owner, Total, PD1..PDN
         out.write("<table><thead><tr>")
-        out.write("<th>Owner</th><th>Total</th>")
-        for pd, _fn in files:
-            out.write(f"<th>PD{pd}</th>")
+        out.write("<th>Team Name</th>")
+        out.write("<th>Total Pooh</th>")
+        out.write("<th>Out Of 1st</th>")
+        out.write("<th>Out Of 2nd</th>")
+        out.write("<th>Out Of 3rd</th>")
+
+        # PD columns: 1..max_pd (not hardcoded 19)
+        for pd in range(1, max_pd + 1):
+            out.write(f"<th>{pd}</th>")
+
+        out.write("<th>Avg Pooh Per Completed PD</th>")
+
+        # Keep this column but leave it blank for every row (per your instruction)
+        out.write("<th>Sum of Avgs, Top 5 Eligible</th>")
+
+        # DO NOT include "Remaining Current PD"
         out.write("</tr></thead><tbody>")
 
         for owner in owners_sorted:
+            total = owner_total.get(owner, 0)
+
+            out1 = top1 - total
+            out2 = top2 - total
+            out3 = top3 - total
+
             out.write("<tr>")
             out.write(f"<td>{owner}</td>")
-            out.write(f"<td>{owner_total.get(owner, 0)}</td>")
-            for pd, _fn in files:
-                out.write(f"<td>{per_owner_per_pd[owner].get(pd, 0)}</td>")
+            out.write(f"<td class='num'>{total}</td>")
+            out.write(f"<td class='num'>{out1}</td>")
+            out.write(f"<td class='num'>{out2}</td>")
+            out.write(f"<td class='num'>{out3}</td>")
+
+            for pd in range(1, max_pd + 1):
+                out.write(f"<td class='num'>{per_owner_per_pd[owner].get(pd, 0)}</td>")
+
+            out.write(f"<td class='num'>{owner_avg.get(owner, 0.0):.2f}</td>")
+
+            # Blank column on purpose
+            out.write("<td class='num'></td>")
+
             out.write("</tr>")
 
         out.write("</tbody></table></body></html>")
 
     print(f"Wrote: {out_path}")
+
 
 if __name__ == "__main__":
     main()
