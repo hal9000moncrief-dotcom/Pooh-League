@@ -23,7 +23,6 @@ on:
 permissions:
   contents: write
 
-# Prevent scheduled/manual runs from stomping each other
 concurrency:
   group: pooh-points
   cancel-in-progress: true
@@ -85,8 +84,7 @@ jobs:
           echo "Run mode: $RUN_MODE"
           echo "Effective date (America/Chicago when blank): $DATE_LOCAL"
 
-      # IMPORTANT:
-      # This step expects you to add app/resolve_pd.py (I provided the full file earlier).
+      # Expects app/resolve_pd.py to exist (the helper that writes pd_resolved.txt)
       - name: Validate Final Run date maps to a Play Date (PDx)
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
@@ -120,28 +118,7 @@ jobs:
           echo "Running script for date $DATE_LOCAL (RUN_MODE=$RUN_MODE)"
           python -u app/python_today_pooh.py "$DATE_LOCAL"
 
-      - name: Build Summary of Results to Date (Final runs only)
-        if: ${{ steps.params.outputs.run_mode == 'final' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -u app/build_summary_to_date.py
-
-      - name: Build Player Pooh Summary (Final runs only)
-        if: ${{ steps.params.outputs.run_mode == 'final' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -u app/build_player_pooh_summary.py
-
-      - name: Build Schedule page (HTML)
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -u app/build_schedule_html.py
-
-      # Guardrail: if any build step touched Final files, stop.
-      # (This is what was corrupting PD7 with PD8 data.)
+      # Guardrail: ensure no earlier step touched Final files (prevents accidental overwrites)
       - name: "Guard: Final_* must not change before snapshot"
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
@@ -153,14 +130,15 @@ jobs:
             exit 1
           fi
 
-      # Snapshot copy MUST be last so nothing can overwrite it afterwards.
-      - name: "If Final Run, create Final_* copies for that PD (LAST)"
+      # Snapshot copy must happen BEFORE summaries so summaries include the freshly written PD file,
+      # and so we can cap summaries "through PDx".
+      - name: "If Final Run, create Final_* copies for that PD"
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
         run: |
           set -euo pipefail
           PD="$(cat pd_resolved.txt)"
-          echo "Creating Final_* copies for $PD from today_*.html (snapshot written last)"
+          echo "Creating Final_* copies for $PD from today_*.html"
 
           test -f "docs/today_players.html"
           test -f "docs/today_owners.html"
@@ -171,6 +149,24 @@ jobs:
           echo "Created:"
           echo "  docs/Final_Players_${PD}.html"
           echo "  docs/Final_Owners_${PD}.html"
+
+      # Build summaries AFTER snapshot so they see the newest Final_*,
+      # and CAP summaries through the PD you just finalized.
+      - name: Build summaries (Final runs only, capped through PD)
+        if: ${{ steps.params.outputs.run_mode == 'final' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PD="$(cat pd_resolved.txt)"
+          echo "Building summaries capped through $PD"
+          python -u app/build_summary_to_date.py "$PD"
+          python -u app/build_player_pooh_summary.py "$PD"
+
+      - name: Build Schedule page (HTML)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u app/build_schedule_html.py
 
       - name: Commit site updates if changed
         shell: bash
