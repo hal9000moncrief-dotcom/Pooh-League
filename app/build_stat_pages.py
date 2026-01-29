@@ -131,22 +131,10 @@ def event_local_yyyymmdd(e: dict) -> str:
 # ----------------------------
 # PD.xlsx loader (ROBUST)
 # ----------------------------
-_MMDDYYYY_RE = re.compile(r"^\d{8}$")
-_YYYYMMDD_RE = re.compile(r"^\d{8}$")
-
 def _cell_to_date_yyyymmdd(cell_value) -> Optional[str]:
-    """
-    Try hard to interpret a cell as a date and return YYYYMMDD.
-    Accepts:
-      - datetime / date
-      - strings like mmddyyyy or yyyymmdd (with or without separators)
-      - strings like 01/24/2026, 2026-01-24, etc.
-      - numbers are ignored here (openpyxl usually converts Excel dates to datetime when is_date=True)
-    """
     if cell_value is None:
         return None
 
-    # datetime/date objects (Excel date cells often come in like this)
     if isinstance(cell_value, datetime):
         return cell_value.strftime("%Y%m%d")
     if isinstance(cell_value, dt_date):
@@ -156,21 +144,14 @@ def _cell_to_date_yyyymmdd(cell_value) -> Optional[str]:
     if not s:
         return None
 
-    # Remove junk
     s2 = re.sub(r"\s+", "", s)
-
-    # If it's like "01032026" (mmddyyyy)
     digits = re.sub(r"\D", "", s2)
 
     if len(digits) == 8:
-        # Could be mmddyyyy OR yyyymmdd. We disambiguate:
-        # If first 4 looks like a plausible year (19xx/20xx), treat as yyyymmdd; else mmddyyyy.
         first4 = int(digits[0:4])
         if 1900 <= first4 <= 2100:
-            # yyyymmdd
             yyyy, mm, dd = digits[0:4], digits[4:6], digits[6:8]
         else:
-            # mmddyyyy
             mm, dd, yyyy = digits[0:2], digits[2:4], digits[4:8]
         try:
             dt = datetime(int(yyyy), int(mm), int(dd), tzinfo=LOCAL_TZ)
@@ -178,7 +159,6 @@ def _cell_to_date_yyyymmdd(cell_value) -> Optional[str]:
         except:
             return None
 
-    # Try common formatted strings
     for fmt in ("%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d", "%Y/%m/%d"):
         try:
             dt = datetime.strptime(s2, fmt).replace(tzinfo=LOCAL_TZ)
@@ -189,20 +169,13 @@ def _cell_to_date_yyyymmdd(cell_value) -> Optional[str]:
     return None
 
 def _cell_to_pd_num(cell_value) -> Optional[int]:
-    """
-    PD number should be an int like 1..200.
-    """
     if cell_value is None:
         return None
-    # If already numeric
     try:
-        if isinstance(cell_value, (int,)):
+        if isinstance(cell_value, int):
             n = int(cell_value)
-            if 1 <= n <= 500:
-                return n
-            return None
+            return n if 1 <= n <= 500 else None
         if isinstance(cell_value, float):
-            # Excel may store as 1.0
             n = int(cell_value)
             if abs(cell_value - n) < 1e-9 and 1 <= n <= 500:
                 return n
@@ -216,18 +189,10 @@ def _cell_to_pd_num(cell_value) -> Optional[int]:
     s = re.sub(r"\.0$", "", s)
     if re.fullmatch(r"\d{1,3}", s):
         n = int(s)
-        if 1 <= n <= 500:
-            return n
+        return n if 1 <= n <= 500 else None
     return None
 
 def load_pd_map(pd_xlsx: str) -> Dict[int, str]:
-    """
-    Returns {pd_num: primary_date_yyyymmdd} for all rows in PD.xlsx.
-
-    Robust column detection:
-      - scans each row and tries to find ONE date value and ONE PD int value anywhere in the row
-      - supports header rows, shifted columns, Excel date cells, text mmddyyyy, text yyyymmdd, etc.
-    """
     if not os.path.exists(pd_xlsx):
         raise SystemExit(f"ERROR: Missing {pd_xlsx}")
 
@@ -235,22 +200,18 @@ def load_pd_map(pd_xlsx: str) -> Dict[int, str]:
     ws = wb.active
 
     out: Dict[int, str] = {}
-
-    # Scan all rows; take the first date+pd pair per row.
     for r in range(1, ws.max_row + 1):
         row_vals = [ws.cell(row=r, column=c).value for c in range(1, min(ws.max_column, 10) + 1)]
 
         pd_num = None
         d_yyyymmdd = None
 
-        # Find PD first (fast)
         for v in row_vals:
             n = _cell_to_pd_num(v)
             if n is not None:
                 pd_num = n
                 break
 
-        # Find date
         for v in row_vals:
             d = _cell_to_date_yyyymmdd(v)
             if d is not None:
@@ -260,11 +221,9 @@ def load_pd_map(pd_xlsx: str) -> Dict[int, str]:
         if pd_num is None or d_yyyymmdd is None:
             continue
 
-        # Keep last occurrence if duplicates (shouldn't happen, but safe)
         out[pd_num] = d_yyyymmdd
 
     if not out:
-        # Helpful debug print so you can see what the file actually contains in GH runner logs
         sample = []
         for r in range(1, min(ws.max_row, 12) + 1):
             sample.append([ws.cell(row=r, column=c).value for c in range(1, min(ws.max_column, 6) + 1)])
@@ -277,7 +236,7 @@ def load_pd_map(pd_xlsx: str) -> Dict[int, str]:
 
 
 # ----------------------------
-# Rosters loader (for rostered-only output)
+# Rosters loader (NOW includes Cost/Ht/Wt/Class/Pos)
 # ----------------------------
 def load_rosters(rosters_xlsx: str) -> Dict[str, dict]:
     if not os.path.exists(rosters_xlsx):
@@ -285,6 +244,7 @@ def load_rosters(rosters_xlsx: str) -> Dict[str, dict]:
 
     wb = load_workbook(rosters_xlsx, data_only=True)
     ws = wb.active
+
     headers = [("" if c.value is None else str(c.value).strip()) for c in ws[1]]
     headers_l = [h.lower() for h in headers]
 
@@ -294,25 +254,42 @@ def load_rosters(rosters_xlsx: str) -> Dict[str, dict]:
                 return headers_l.index(c.lower()) + 1
         return None
 
-    c_name = col("name", "player")
+    c_name   = col("name", "player")
     if not c_name:
         raise SystemExit("ERROR: rosters.xlsx must have a 'Name' column.")
 
-    c_owner = col("owner", "team name")
-    c_team  = col("team")
+    c_owner  = col("owner", "team name")
+    c_team   = col("team")
+    c_cost   = col("cost")
+    c_height = col("height", "ht")
+    c_weight = col("weight", "wt")
+    c_class  = col("class")
+    c_pos    = col("position", "pos")
+
+    def sval(r: int, c: Optional[int]) -> str:
+        if c is None:
+            return ""
+        v = ws.cell(row=r, column=c).value
+        return "" if v is None else str(v).strip()
 
     out: Dict[str, dict] = {}
     for r in range(2, ws.max_row + 1):
-        name = ws.cell(row=r, column=c_name).value
-        name = "" if name is None else str(name).strip()
+        name = sval(r, c_name)
         if not name:
             continue
+
         key = norm_name(name)
         out[key] = {
             "Name": name,
-            "Team Name": "" if c_owner is None else ("" if ws.cell(row=r, column=c_owner).value is None else str(ws.cell(row=r, column=c_owner).value).strip()),
-            "Team": "" if c_team is None else ("" if ws.cell(row=r, column=c_team).value is None else str(ws.cell(row=r, column=c_team).value).strip()),
+            "Team Name": sval(r, c_owner),
+            "Team": sval(r, c_team),
+            "Cost": sval(r, c_cost),
+            "Ht": sval(r, c_height),
+            "Wt": sval(r, c_weight),
+            "Class": sval(r, c_class),
+            "Pos": sval(r, c_pos),
         }
+
     return out
 
 
@@ -468,6 +445,12 @@ def pct(made: int, att: int) -> Optional[float]:
         return None
     return made / att
 
+def min_per_game(agg: dict) -> str:
+    g = int(agg.get("G", 0))
+    if g <= 0:
+        return ""
+    return f"{(float(agg.get('MIN', 0.0)) / g):.1f}"
+
 
 # ----------------------------
 # HTML output
@@ -504,6 +487,9 @@ def write_simple_table(out_path: str, title: str, cols: List[str], rows: List[Li
     print(f"Wrote: {out_path}")
 
 
+# ----------------------------
+# Main
+# ----------------------------
 def main():
     cap_pd = None
     if len(sys.argv) >= 2 and sys.argv[1].strip():
@@ -560,6 +546,22 @@ def main():
     def roster_name(k: str) -> str:
         return rosters.get(k, {}).get("Name", "")
 
+    def roster_field(k: str, field: str) -> str:
+        return (rosters.get(k, {}) or {}).get(field, "") or ""
+
+    # Common column block (inserted between Team and G)
+    def mid_cols_values(k: str, agg: dict) -> List[str]:
+        return [
+            roster_field(k, "Cost"),
+            roster_field(k, "Ht"),
+            roster_field(k, "Wt"),
+            roster_field(k, "Class"),
+            roster_field(k, "Pos"),
+            min_per_game(agg),
+        ]
+
+    MID_COLS = ["Cost", "Ht", "Wt", "Class", "Pos", "Min/G"]
+
     # ---------- FG% ----------
     fg_rows = []
     for k in rosters.keys():
@@ -574,21 +576,24 @@ def main():
         a = totals_by_player.get(k, agg_empty())
         fgp = pct(a["FGM"], a["FGA"])
         fgp_s = f"{fgp*100:.1f}%" if fgp is not None else ""
-        fg_out.append([
-            str(rank),
-            name,
-            owner_by_player.get(k, ""),
-            team_abbr_by_player.get(k, rosters.get(k, {}).get("Team","")),
-            str(a["G"]) if a["G"] > 0 else "",
-            f"{a['FGM']}-{a['FGA']}" if a["FGA"] > 0 else "",
-            fgp_s
-        ])
+        fg_out.append(
+            [
+                str(rank),
+                name,
+                owner_by_player.get(k, ""),
+                team_abbr_by_player.get(k, roster_field(k, "Team")),
+                *mid_cols_values(k, a),
+                str(a["G"]) if a["G"] > 0 else "",
+                f"{a['FGM']}-{a['FGA']}" if a["FGA"] > 0 else "",
+                fgp_s
+            ]
+        )
         rank += 1
 
     write_simple_table(
         os.path.join(DOCS_DIR, "FieldGoalPercentage.html"),
         f"Field Goal Percentage (Through PD{max_pd})",
-        ["#", "Name", "Team Name", "Team", "G", "FG", "FG%"],
+        ["#", "Name", "Team Name", "Team", *MID_COLS, "G", "FG", "FG%"],
         fg_out
     )
 
@@ -606,21 +611,24 @@ def main():
         a = totals_by_player.get(k, agg_empty())
         p3 = pct(a["3PM"], a["3PA"])
         p3_s = f"{p3*100:.1f}%" if p3 is not None else ""
-        tp_out.append([
-            str(rank),
-            name,
-            owner_by_player.get(k, ""),
-            team_abbr_by_player.get(k, rosters.get(k, {}).get("Team","")),
-            str(a["G"]) if a["G"] > 0 else "",
-            f"{a['3PM']}-{a['3PA']}" if a["3PA"] > 0 else "",
-            p3_s
-        ])
+        tp_out.append(
+            [
+                str(rank),
+                name,
+                owner_by_player.get(k, ""),
+                team_abbr_by_player.get(k, roster_field(k, "Team")),
+                *mid_cols_values(k, a),
+                str(a["G"]) if a["G"] > 0 else "",
+                f"{a['3PM']}-{a['3PA']}" if a["3PA"] > 0 else "",
+                p3_s
+            ]
+        )
         rank += 1
 
     write_simple_table(
         os.path.join(DOCS_DIR, "ThreePointFieldGoalPercentage.html"),
         f"3-Point Field Goal Percentage (Through PD{max_pd})",
-        ["#", "Name", "Team Name", "Team", "G", "3PT", "3PT%"],
+        ["#", "Name", "Team Name", "Team", *MID_COLS, "G", "3PT", "3PT%"],
         tp_out
     )
 
@@ -638,21 +646,24 @@ def main():
         a = totals_by_player.get(k, agg_empty())
         ftp = pct(a["FTM"], a["FTA"])
         ftp_s = f"{ftp*100:.1f}%" if ftp is not None else ""
-        ft_out.append([
-            str(rank),
-            name,
-            owner_by_player.get(k, ""),
-            team_abbr_by_player.get(k, rosters.get(k, {}).get("Team","")),
-            str(a["G"]) if a["G"] > 0 else "",
-            f"{a['FTM']}-{a['FTA']}" if a["FTA"] > 0 else "",
-            ftp_s
-        ])
+        ft_out.append(
+            [
+                str(rank),
+                name,
+                owner_by_player.get(k, ""),
+                team_abbr_by_player.get(k, roster_field(k, "Team")),
+                *mid_cols_values(k, a),
+                str(a["G"]) if a["G"] > 0 else "",
+                f"{a['FTM']}-{a['FTA']}" if a["FTA"] > 0 else "",
+                ftp_s
+            ]
+        )
         rank += 1
 
     write_simple_table(
         os.path.join(DOCS_DIR, "FreeThrowPercentage.html"),
         f"Free Throw Percentage (Through PD{max_pd})",
-        ["#", "Name", "Team Name", "Team", "G", "FT", "FT%"],
+        ["#", "Name", "Team Name", "Team", *MID_COLS, "G", "FT", "FT%"],
         ft_out
     )
 
@@ -675,30 +686,33 @@ def main():
             g = a["G"]
             total = a[field]
             per_g = (total / g) if g > 0 else None
-            out.append([
-                str(rank),
-                name,
-                owner_by_player.get(k, ""),
-                team_abbr_by_player.get(k, rosters.get(k, {}).get("Team","")),
-                str(g) if g > 0 else "",
-                str(total) if g > 0 else "",
-                f"{per_g:.2f}" if per_g is not None else ""
-            ])
+            out.append(
+                [
+                    str(rank),
+                    name,
+                    owner_by_player.get(k, ""),
+                    team_abbr_by_player.get(k, roster_field(k, "Team")),
+                    *mid_cols_values(k, a),
+                    str(g) if g > 0 else "",
+                    str(total) if g > 0 else "",
+                    f"{per_g:.2f}" if per_g is not None else ""
+                ]
+            )
             rank += 1
 
         write_simple_table(
             os.path.join(DOCS_DIR, filename),
             f"{label} (Per Game) (Through PD{max_pd})",
-            ["#", "Name", "Team Name", "Team", "G", f"{label} (Total)", f"{label}/G"],
+            ["#", "Name", "Team Name", "Team", *MID_COLS, "G", f"{label} (Total)", f"{label}/G"],
             out
         )
 
-    write_count_page("Rebounds.html",       "Rebounds",      "REB")
-    write_count_page("BlockedShots.html",   "Blocked Shots", "BLK")
-    write_count_page("Assists.html",        "Assists",       "AST")
-    write_count_page("Steals.html",         "Steals",        "STL")
-    write_count_page("Turnovers.html",      "Turnovers",     "TO")
-    write_count_page("PersonalFouls.html",  "Personal Fouls","PF")
+    write_count_page("Rebounds.html",      "Rebounds",       "REB")
+    write_count_page("BlockedShots.html",  "Blocked Shots",  "BLK")
+    write_count_page("Assists.html",       "Assists",        "AST")
+    write_count_page("Steals.html",        "Steals",         "STL")
+    write_count_page("Turnovers.html",     "Turnovers",      "TO")
+    write_count_page("PersonalFouls.html", "Personal Fouls", "PF")
 
 
 if __name__ == "__main__":
