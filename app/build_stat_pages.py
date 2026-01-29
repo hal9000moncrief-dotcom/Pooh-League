@@ -5,7 +5,7 @@ import time
 import random
 import html
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as dt_date
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
@@ -129,15 +129,104 @@ def event_local_yyyymmdd(e: dict) -> str:
 
 
 # ----------------------------
-# PD.xlsx loader
+# PD.xlsx loader (ROBUST)
 # ----------------------------
+_MMDDYYYY_RE = re.compile(r"^\d{8}$")
+_YYYYMMDD_RE = re.compile(r"^\d{8}$")
+
+def _cell_to_date_yyyymmdd(cell_value) -> Optional[str]:
+    """
+    Try hard to interpret a cell as a date and return YYYYMMDD.
+    Accepts:
+      - datetime / date
+      - strings like mmddyyyy or yyyymmdd (with or without separators)
+      - strings like 01/24/2026, 2026-01-24, etc.
+      - numbers are ignored here (openpyxl usually converts Excel dates to datetime when is_date=True)
+    """
+    if cell_value is None:
+        return None
+
+    # datetime/date objects (Excel date cells often come in like this)
+    if isinstance(cell_value, datetime):
+        return cell_value.strftime("%Y%m%d")
+    if isinstance(cell_value, dt_date):
+        return cell_value.strftime("%Y%m%d")
+
+    s = str(cell_value).strip()
+    if not s:
+        return None
+
+    # Remove junk
+    s2 = re.sub(r"\s+", "", s)
+
+    # If it's like "01032026" (mmddyyyy)
+    digits = re.sub(r"\D", "", s2)
+
+    if len(digits) == 8:
+        # Could be mmddyyyy OR yyyymmdd. We disambiguate:
+        # If first 4 looks like a plausible year (19xx/20xx), treat as yyyymmdd; else mmddyyyy.
+        first4 = int(digits[0:4])
+        if 1900 <= first4 <= 2100:
+            # yyyymmdd
+            yyyy, mm, dd = digits[0:4], digits[4:6], digits[6:8]
+        else:
+            # mmddyyyy
+            mm, dd, yyyy = digits[0:2], digits[2:4], digits[4:8]
+        try:
+            dt = datetime(int(yyyy), int(mm), int(dd), tzinfo=LOCAL_TZ)
+            return dt.strftime("%Y%m%d")
+        except:
+            return None
+
+    # Try common formatted strings
+    for fmt in ("%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            dt = datetime.strptime(s2, fmt).replace(tzinfo=LOCAL_TZ)
+            return dt.strftime("%Y%m%d")
+        except:
+            pass
+
+    return None
+
+def _cell_to_pd_num(cell_value) -> Optional[int]:
+    """
+    PD number should be an int like 1..200.
+    """
+    if cell_value is None:
+        return None
+    # If already numeric
+    try:
+        if isinstance(cell_value, (int,)):
+            n = int(cell_value)
+            if 1 <= n <= 500:
+                return n
+            return None
+        if isinstance(cell_value, float):
+            # Excel may store as 1.0
+            n = int(cell_value)
+            if abs(cell_value - n) < 1e-9 and 1 <= n <= 500:
+                return n
+            return None
+    except:
+        pass
+
+    s = str(cell_value).strip()
+    if not s:
+        return None
+    s = re.sub(r"\.0$", "", s)
+    if re.fullmatch(r"\d{1,3}", s):
+        n = int(s)
+        if 1 <= n <= 500:
+            return n
+    return None
+
 def load_pd_map(pd_xlsx: str) -> Dict[int, str]:
     """
     Returns {pd_num: primary_date_yyyymmdd} for all rows in PD.xlsx.
 
-    PD.xlsx is expected to have:
-      Col A = mmddyyyy (string or number)
-      Col B = PD number (int)
+    Robust column detection:
+      - scans each row and tries to find ONE date value and ONE PD int value anywhere in the row
+      - supports header rows, shifted columns, Excel date cells, text mmddyyyy, text yyyymmdd, etc.
     """
     if not os.path.exists(pd_xlsx):
         raise SystemExit(f"ERROR: Missing {pd_xlsx}")
@@ -146,47 +235,51 @@ def load_pd_map(pd_xlsx: str) -> Dict[int, str]:
     ws = wb.active
 
     out: Dict[int, str] = {}
+
+    # Scan all rows; take the first date+pd pair per row.
     for r in range(1, ws.max_row + 1):
-        a = ws.cell(row=r, column=1).value
-        b = ws.cell(row=r, column=2).value
+        row_vals = [ws.cell(row=r, column=c).value for c in range(1, min(ws.max_column, 10) + 1)]
 
-        if a is None or b is None:
+        pd_num = None
+        d_yyyymmdd = None
+
+        # Find PD first (fast)
+        for v in row_vals:
+            n = _cell_to_pd_num(v)
+            if n is not None:
+                pd_num = n
+                break
+
+        # Find date
+        for v in row_vals:
+            d = _cell_to_date_yyyymmdd(v)
+            if d is not None:
+                d_yyyymmdd = d
+                break
+
+        if pd_num is None or d_yyyymmdd is None:
             continue
 
-        pd_num = safe_int(b)
-        if pd_num <= 0:
-            continue
-
-        # a is mmddyyyy as text or numeric; normalize to 8 digits
-        a_str = str(a).strip()
-        a_str = re.sub(r"\.0$", "", a_str)  # handle excel numeric-as-float display
-        a_str = re.sub(r"\D", "", a_str)
-
-        if len(a_str) != 8:
-            # Skip row silently; better than guessing
-            continue
-
-        # Convert mmddyyyy -> yyyymmdd
-        mm = a_str[0:2]
-        dd = a_str[2:4]
-        yyyy = a_str[4:8]
-        yyyymmdd = f"{yyyy}{mm}{dd}"
-
-        out[pd_num] = yyyymmdd
+        # Keep last occurrence if duplicates (shouldn't happen, but safe)
+        out[pd_num] = d_yyyymmdd
 
     if not out:
+        # Helpful debug print so you can see what the file actually contains in GH runner logs
+        sample = []
+        for r in range(1, min(ws.max_row, 12) + 1):
+            sample.append([ws.cell(row=r, column=c).value for c in range(1, min(ws.max_column, 6) + 1)])
+        print("DEBUG PD.xlsx first rows (first 6 cols):")
+        for i, row in enumerate(sample, start=1):
+            print(f"Row {i}: {row}")
         raise SystemExit(f"ERROR: No PD rows found in {pd_xlsx}")
 
     return out
 
 
 # ----------------------------
-# Rosters loader (for "Team Name" / rostered-only output)
+# Rosters loader (for rostered-only output)
 # ----------------------------
 def load_rosters(rosters_xlsx: str) -> Dict[str, dict]:
-    """
-    Uses rosters.xlsx like your existing build_player_pooh_summary.py.
-    """
     if not os.path.exists(rosters_xlsx):
         raise SystemExit(f"ERROR: Missing {rosters_xlsx}")
 
@@ -230,7 +323,6 @@ def get_sec_events(date_yyyymmdd: str) -> List[dict]:
     url = f"{BASE}/scoreboard?dates={date_yyyymmdd}&groups=23&limit=500"
     data = get_json(url)
     events = data.get("events", []) or []
-    # strict local date filter to avoid UTC boundary issues
     return [e for e in events if event_local_yyyymmdd(e) == date_yyyymmdd]
 
 
@@ -256,11 +348,6 @@ def _idx(labels: List[str], *cands: str) -> Optional[int]:
     return None
 
 def parse_player_line(values: List[str], labels: List[str]) -> Optional[dict]:
-    """
-    Pull the fields we need to support:
-      FG%, 3P%, FT%, REB, BLK, AST, STL, TO, PF
-    plus MIN and PTS (nice-to-have).
-    """
     if not labels or not values:
         return None
 
@@ -276,9 +363,6 @@ def parse_player_line(values: List[str], labels: List[str]) -> Optional[dict]:
     i_pf  = _idx(labels, "PF")
     i_pts = _idx(labels, "PTS")
 
-    # MIN + REB/AST/STL/BLK/TO are usually present; percentages need attempts columns
-    # We'll accept missing 3PT/PF if ESPN doesn't provide for a given table, but
-    # if MIN/REB/AST/STL/BLK/TO are missing, line is too incomplete.
     required = [i_min, i_reb, i_ast, i_stl, i_blk, i_to]
     if any(x is None for x in required):
         return None
@@ -289,7 +373,6 @@ def parse_player_line(values: List[str], labels: List[str]) -> Optional[dict]:
         return values[i]
 
     mins = to_minutes(get(i_min))
-
     fgm, fga = parse_made_attempt(get(i_fg)) if i_fg is not None else (0, 0)
     tpm, tpa = parse_made_attempt(get(i_3pt)) if i_3pt is not None else (0, 0)
     ftm, fta = parse_made_attempt(get(i_ft)) if i_ft is not None else (0, 0)
@@ -302,7 +385,6 @@ def parse_player_line(values: List[str], labels: List[str]) -> Optional[dict]:
     tov = safe_int(get(i_to))
     pf  = safe_int(get(i_pf)) if i_pf is not None else 0
 
-    # Skip truly blank rows
     if mins == 0 and pts == 0 and reb == 0 and ast == 0 and stl == 0 and blk == 0 and tov == 0 and pf == 0 and fga == 0 and fta == 0 and tpa == 0:
         return None
 
@@ -366,7 +448,7 @@ def get_boxscore_players_full(event_id: str) -> List[dict]:
 
 
 # ----------------------------
-# Aggregation across PDs
+# Aggregation
 # ----------------------------
 STAT_FIELDS_INT = ["PTS","REB","AST","STL","BLK","TO","PF","FGM","FGA","3PM","3PA","FTM","FTA"]
 STAT_FIELDS_FLOAT = ["MIN"]
@@ -423,7 +505,6 @@ def write_simple_table(out_path: str, title: str, cols: List[str], rows: List[Li
 
 
 def main():
-    # Optional arg: PD7 (cap through PD7)
     cap_pd = None
     if len(sys.argv) >= 2 and sys.argv[1].strip():
         s = sys.argv[1].strip().upper()
@@ -439,7 +520,6 @@ def main():
     if cap_pd is not None:
         max_pd = min(max_pd, cap_pd)
 
-    # Aggregate across PD1..max_pd, where each PD uses (prev day + primary day)
     totals_by_player = defaultdict(agg_empty)
     team_abbr_by_player: Dict[str, str] = {}
     owner_by_player: Dict[str, str] = {}
@@ -448,7 +528,7 @@ def main():
         if pd not in pd_map:
             continue
 
-        primary = parse_yyyymmdd(pd_map[pd])      # local midnight
+        primary = parse_yyyymmdd(pd_map[pd])
         prev = primary - timedelta(days=1)
 
         for dt in (prev, primary):
@@ -466,37 +546,31 @@ def main():
                     if not key:
                         continue
 
-                    # If you only want rostered players on these pages, enforce that here:
+                    # roster-only
                     if key not in rosters:
                         continue
 
                     accumulate_player(totals_by_player[key], p)
 
-                    # Keep latest seen team abbr for display
                     if p.get("team"):
                         team_abbr_by_player[key] = p["team"]
 
-                    # Owner/Team Name from roster
                     owner_by_player[key] = rosters.get(key, {}).get("Team Name", "")
 
-    # Build rows from roster keys to keep stable output ordering even if no stats yet
-    # (Players with zero games will appear at bottom with blanks where appropriate.)
     def roster_name(k: str) -> str:
         return rosters.get(k, {}).get("Name", "")
 
-    # ---------- FG% page ----------
+    # ---------- FG% ----------
     fg_rows = []
     for k in rosters.keys():
         a = totals_by_player.get(k, agg_empty())
         fgp = pct(a["FGM"], a["FGA"])
-        # Display blanks if no attempts
-        fgp_s = f"{fgp*100:.1f}%" if fgp is not None else ""
         fg_rows.append((fgp if fgp is not None else -1.0, a["FGA"], roster_name(k), k))
-
     fg_rows.sort(key=lambda x: (-(x[0] if x[0] >= 0 else -1), -x[1], x[2]))
+
     fg_out = []
     rank = 1
-    for fgp_val, fga, name, k in fg_rows:
+    for _, __, name, k in fg_rows:
         a = totals_by_player.get(k, agg_empty())
         fgp = pct(a["FGM"], a["FGA"])
         fgp_s = f"{fgp*100:.1f}%" if fgp is not None else ""
@@ -518,17 +592,17 @@ def main():
         fg_out
     )
 
-    # ---------- 3PT% page ----------
+    # ---------- 3PT% ----------
     tp_rows = []
     for k in rosters.keys():
         a = totals_by_player.get(k, agg_empty())
         p3 = pct(a["3PM"], a["3PA"])
         tp_rows.append((p3 if p3 is not None else -1.0, a["3PA"], roster_name(k), k))
-
     tp_rows.sort(key=lambda x: (-(x[0] if x[0] >= 0 else -1), -x[1], x[2]))
+
     tp_out = []
     rank = 1
-    for p3_val, tpa, name, k in tp_rows:
+    for _, __, name, k in tp_rows:
         a = totals_by_player.get(k, agg_empty())
         p3 = pct(a["3PM"], a["3PA"])
         p3_s = f"{p3*100:.1f}%" if p3 is not None else ""
@@ -550,17 +624,17 @@ def main():
         tp_out
     )
 
-    # ---------- FT% page ----------
+    # ---------- FT% ----------
     ft_rows = []
     for k in rosters.keys():
         a = totals_by_player.get(k, agg_empty())
         ftp = pct(a["FTM"], a["FTA"])
         ft_rows.append((ftp if ftp is not None else -1.0, a["FTA"], roster_name(k), k))
-
     ft_rows.sort(key=lambda x: (-(x[0] if x[0] >= 0 else -1), -x[1], x[2]))
+
     ft_out = []
     rank = 1
-    for ftp_val, fta, name, k in ft_rows:
+    for _, __, name, k in ft_rows:
         a = totals_by_player.get(k, agg_empty())
         ftp = pct(a["FTM"], a["FTA"])
         ftp_s = f"{ftp*100:.1f}%" if ftp is not None else ""
@@ -582,7 +656,7 @@ def main():
         ft_out
     )
 
-    # Generic “count stat per game” pages
+    # Count-stat per game pages
     def write_count_page(filename: str, label: str, field: str):
         rows = []
         for k in rosters.keys():
@@ -593,13 +667,14 @@ def main():
             rows.append((per_g if per_g is not None else -1.0, total, roster_name(k), k))
 
         rows.sort(key=lambda x: (-(x[0] if x[0] >= 0 else -1), -x[1], x[2]))
+
         out = []
         rank = 1
-        for per_g, total, name, k in rows:
+        for _, __, name, k in rows:
             a = totals_by_player.get(k, agg_empty())
             g = a["G"]
             total = a[field]
-            per_g2 = (total / g) if g > 0 else None
+            per_g = (total / g) if g > 0 else None
             out.append([
                 str(rank),
                 name,
@@ -607,7 +682,7 @@ def main():
                 team_abbr_by_player.get(k, rosters.get(k, {}).get("Team","")),
                 str(g) if g > 0 else "",
                 str(total) if g > 0 else "",
-                f"{per_g2:.2f}" if per_g2 is not None else ""
+                f"{per_g:.2f}" if per_g is not None else ""
             ])
             rank += 1
 
