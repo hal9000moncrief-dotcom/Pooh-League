@@ -12,6 +12,9 @@ APP_DIR  = os.path.join(os.path.dirname(__file__), "..", "app")
 
 ROSTERS_XLSX = os.path.join(APP_DIR, "rosters.xlsx")
 
+OUT_PLAYER = os.path.join(DOCS_DIR, "Player_Pooh_Summary.html")
+OUT_BY_TEAM = os.path.join(DOCS_DIR, "Pooh_Summary_By_Team.html")
+
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -194,8 +197,7 @@ def load_final_player_data(cap_pd: Optional[int]):
             pooh = safe_int(r[i_pooh]) if i_pooh < len(r) else 0
             pooh_by_player_pd[key][pd] = pooh
 
-            # If this row exists, count it as a game played for that PD
-            # (Final_Players files should only have players who actually played)
+            # Count as a game played for that PD.
             agg[key]["games"] += 1
             if i_min is not None and i_min < len(r):
                 agg[key]["min"] += safe_float(r[i_min])
@@ -220,12 +222,14 @@ def load_final_player_data(cap_pd: Optional[int]):
     return max_pd, pooh_by_player_pd, agg, owner_by_player
 
 # ----------------------------
-# Write Player_Pooh_Summary.html
+# Write HTML
 # ----------------------------
-def write_html(out_path: str, cols: List[str], rows: List[Dict[str, str]]):
+NUM_COLS = {"Cost","Min/G","Avg","Total","PPG","R/G","A/G","B/G","S/G","T/G"}
+
+def write_html(out_path: str, cols: List[str], rows: List[Dict[str, str]], title: str):
     with open(out_path, "w", encoding="utf-8") as out:
         out.write("<!doctype html><html><head><meta charset='utf-8'>")
-        out.write("<title>Player Pooh Summary</title>")
+        out.write(f"<title>{title}</title>")
         out.write(
             "<style>"
             "body{font-family:Arial}"
@@ -236,7 +240,7 @@ def write_html(out_path: str, cols: List[str], rows: List[Dict[str, str]]):
             "</style>"
         )
         out.write("</head><body>")
-        out.write("<h2 style='text-align:center'>Player Pooh Summary</h2>")
+        out.write(f"<h2 style='text-align:center'>{title}</h2>")
 
         out.write("<table><thead><tr>")
         for c in cols:
@@ -247,7 +251,7 @@ def write_html(out_path: str, cols: List[str], rows: List[Dict[str, str]]):
             out.write("<tr>")
             for c in cols:
                 v = r.get(c, "")
-                is_num = (c in {"Cost","Min/G","Avg","Total","PPG","R/G","A/G","B/G","S/G","T/G"} or c.isdigit())
+                is_num = (c in NUM_COLS) or c.isdigit()
                 cls = " class='num'" if is_num else ""
                 out.write(f"<td{cls}>{v}</td>")
             out.write("</tr>")
@@ -273,7 +277,7 @@ def main():
 
     rows_out: List[Dict[str, str]] = []
 
-    # Build rows from roster list (so you keep every drafted player even if they never played)
+    # Build rows from roster list (keeps every rostered player even if they never played)
     for key, info in rosters.items():
         # Pooh per PD
         pd_vals = [pooh_by_player_pd.get(key, {}).get(pd, 0) for pd in range(1, max_pd + 1)]
@@ -320,11 +324,19 @@ def main():
 
         rows_out.append(row)
 
-    # Sort by Total Pooh desc, then Name
-    rows_out.sort(key=lambda r: (-safe_int(r.get("Total","0")), r.get("Name","")))
+    # 1) Player_Pooh_Summary.html: sort by Total desc, then Name
+    rows_players = sorted(rows_out, key=lambda r: (-safe_int(r.get("Total","0")), r.get("Name","")))
+    write_html(OUT_PLAYER, cols, rows_players, title="Player Pooh Summary")
 
-    out_path = os.path.join(DOCS_DIR, "Player_Pooh_Summary.html")
-    write_html(out_path, cols, rows_out)
+    # 2) Pooh_Summary_By_Team.html: sort by Team Name (Owner) asc, then Avg desc, then Name
+    def sort_key_by_team_then_avg(r):
+        team = (r.get("Team Name") or "").strip().lower()
+        avg = safe_float(r.get("Avg", 0))
+        name = (r.get("Name") or "")
+        return (team, -avg, name)
+
+    rows_by_team = sorted(rows_out, key=sort_key_by_team_then_avg)
+    write_html(OUT_BY_TEAM, cols, rows_by_team, title="Pooh Summary By Team")
 
 if __name__ == "__main__":
     main()
