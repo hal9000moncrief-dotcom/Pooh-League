@@ -200,7 +200,6 @@ def load_final_player_data(cap_pd: Optional[int]):
                 continue
             seen_this_pd.add(key)
 
-            # Player appeared in the box score for this PD => record value (including 0)
             pooh = safe_int(r[i_pooh]) if i_pooh < len(r) else 0
             pooh_by_player_pd[key][pd] = pooh
 
@@ -274,7 +273,6 @@ def main():
     rosters = load_rosters()
     max_pd, pooh_by_player_pd, agg, owner_by_player = load_final_player_data(cap_pd)
 
-    # Columns EXACTLY as you requested
     fixed_cols = ["Team Name","Cost","Name","Team","Height","Weight","Class","Position","Min/G","Avg","Total"]
     pd_cols = [str(i) for i in range(1, max_pd + 1)]
     tail_cols = ["PPG","R/G","A/G","B/G","S/G","T/G"]
@@ -282,14 +280,10 @@ def main():
 
     rows_out: List[Dict[str, str]] = []
 
-    # Build rows from roster list (keeps every rostered player even if they never played)
     for key, info in rosters.items():
         player_pd_map = pooh_by_player_pd.get(key, {})
-
-        # Games played = PDs where player appears in the box score (includes real 0s)
         games_played = len(player_pd_map)
 
-        # Pooh totals/avg: blanks excluded; real zeros included automatically
         pd_vals_present = [player_pd_map[pd] for pd in range(1, max_pd + 1) if pd in player_pd_map]
         total_pooh = sum(pd_vals_present)
         avg_pooh = (total_pooh / games_played) if games_played > 0 else 0.0
@@ -297,7 +291,6 @@ def main():
         g = agg.get(key, {"min": 0.0, "pts": 0, "reb": 0, "ast": 0, "stl": 0, "blk": 0, "to": 0})
 
         def per_game(n: float) -> float:
-            # All averages exclude games not played (blanks) by using games_played
             return (n / games_played) if games_played > 0 else 0.0
 
         min_g = per_game(g["min"])
@@ -330,7 +323,6 @@ def main():
             "T/G": f"{tpg:.2f}",
         }
 
-        # PD columns: blank if not present; otherwise the actual value (including 0)
         for pd in range(1, max_pd + 1):
             if pd in player_pd_map:
                 row[str(pd)] = str(player_pd_map[pd])
@@ -339,14 +331,20 @@ def main():
 
         rows_out.append(row)
 
-    # 1) Player_Pooh_Summary.html: sort by Total desc, then Name
-    rows_players = sorted(rows_out, key=lambda r: (-safe_int(r.get("Total","0")), r.get("Name","")))
+    # ✅ FIX: Player summary sort by Avg desc, then Total desc, then Name asc
+    def sort_key_players(r):
+        avg = safe_float(r.get("Avg", "0"))
+        total = safe_int(r.get("Total", "0"))
+        name = (r.get("Name") or "")
+        return (-avg, -total, name)
+
+    rows_players = sorted(rows_out, key=sort_key_players)
     write_html(OUT_PLAYER, cols, rows_players, title="Player Pooh Summary")
 
-    # 2) Pooh_Summary_By_Team.html: sort by Team Name (Owner) asc, then Avg desc, then Name
+    # By-team sort (unchanged): Team asc, then Avg desc, then Name asc
     def sort_key_by_team_then_avg(r):
         team = (r.get("Team Name") or "").strip().lower()
-        avg = safe_float(r.get("Avg", 0))
+        avg = safe_float(r.get("Avg", "0"))
         name = (r.get("Name") or "")
         return (team, -avg, name)
 
