@@ -142,9 +142,9 @@ def load_final_player_data(cap_pd: Optional[int]):
     """
     Returns:
       max_pd
-      pooh_by_player_pd[player_norm][pd] = pooh
+      pooh_by_player_pd[player_norm][pd] = pooh   (ONLY when player appears in boxscore for that PD)
       agg_stats[player_norm] = totals across included PDs:
-         games, min, pts, reb, ast, stl, blk, to
+         min, pts, reb, ast, stl, blk, to
       owner_by_player[player_norm] = owner (from Final files when available)
     """
     files = []
@@ -163,7 +163,7 @@ def load_final_player_data(cap_pd: Optional[int]):
     max_pd = files[-1][0]
 
     pooh_by_player_pd: Dict[str, Dict[int, int]] = defaultdict(dict)
-    agg = defaultdict(lambda: {"games": 0, "min": 0.0, "pts": 0, "reb": 0, "ast": 0, "stl": 0, "blk": 0, "to": 0})
+    agg = defaultdict(lambda: {"min": 0.0, "pts": 0, "reb": 0, "ast": 0, "stl": 0, "blk": 0, "to": 0})
     owner_by_player: Dict[str, str] = {}
 
     for pd, fn in files:
@@ -186,6 +186,9 @@ def load_final_player_data(cap_pd: Optional[int]):
         if i_player is None or i_pooh is None:
             continue
 
+        # Safety: only count a player once per PD file
+        seen_this_pd = set()
+
         for r in rows:
             if i_player >= len(r):
                 continue
@@ -193,12 +196,14 @@ def load_final_player_data(cap_pd: Optional[int]):
             key = norm_name(pname)
             if not key:
                 continue
+            if key in seen_this_pd:
+                continue
+            seen_this_pd.add(key)
 
+            # Player appeared in the box score for this PD => record value (including 0)
             pooh = safe_int(r[i_pooh]) if i_pooh < len(r) else 0
             pooh_by_player_pd[key][pd] = pooh
 
-            # Count as a game played for that PD.
-            agg[key]["games"] += 1
             if i_min is not None and i_min < len(r):
                 agg[key]["min"] += safe_float(r[i_min])
             if i_pts is not None and i_pts < len(r):
@@ -279,16 +284,21 @@ def main():
 
     # Build rows from roster list (keeps every rostered player even if they never played)
     for key, info in rosters.items():
-        # Pooh per PD
-        pd_vals = [pooh_by_player_pd.get(key, {}).get(pd, 0) for pd in range(1, max_pd + 1)]
-        total_pooh = sum(pd_vals)
-        avg_pooh = (total_pooh / max_pd) if max_pd > 0 else 0.0
+        player_pd_map = pooh_by_player_pd.get(key, {})
 
-        g = agg.get(key, {"games": 0, "min": 0.0, "pts": 0, "reb": 0, "ast": 0, "stl": 0, "blk": 0, "to": 0})
-        games = g["games"] if g else 0
+        # Games played = PDs where player appears in the box score (includes real 0s)
+        games_played = len(player_pd_map)
+
+        # Pooh totals/avg: blanks excluded; real zeros included automatically
+        pd_vals_present = [player_pd_map[pd] for pd in range(1, max_pd + 1) if pd in player_pd_map]
+        total_pooh = sum(pd_vals_present)
+        avg_pooh = (total_pooh / games_played) if games_played > 0 else 0.0
+
+        g = agg.get(key, {"min": 0.0, "pts": 0, "reb": 0, "ast": 0, "stl": 0, "blk": 0, "to": 0})
 
         def per_game(n: float) -> float:
-            return (n / games) if games > 0 else 0.0
+            # All averages exclude games not played (blanks) by using games_played
+            return (n / games_played) if games_played > 0 else 0.0
 
         min_g = per_game(g["min"])
         ppg   = per_game(g["pts"])
@@ -319,8 +329,13 @@ def main():
             "S/G": f"{spg:.2f}",
             "T/G": f"{tpg:.2f}",
         }
+
+        # PD columns: blank if not present; otherwise the actual value (including 0)
         for pd in range(1, max_pd + 1):
-            row[str(pd)] = str(pooh_by_player_pd.get(key, {}).get(pd, 0))
+            if pd in player_pd_map:
+                row[str(pd)] = str(player_pd_map[pd])
+            else:
+                row[str(pd)] = ""
 
         rows_out.append(row)
 
