@@ -284,8 +284,8 @@ def load_rosters(rosters_xlsx: str) -> Dict[str, dict]:
             "Team Name": sval(r, c_owner),
             "Team": sval(r, c_team),
             "Cost": sval(r, c_cost),
-            "Ht": sval(r, c_height),
-            "Wt": sval(r, c_weight),
+            "Height": sval(r, c_height),
+            "Weight": sval(r, c_weight),
             "Class": sval(r, c_class),
             "Pos": sval(r, c_pos),
         }
@@ -553,14 +553,14 @@ def main():
     def mid_cols_values(k: str, agg: dict) -> List[str]:
         return [
             roster_field(k, "Cost"),
-            roster_field(k, "Ht"),
-            roster_field(k, "Wt"),
+            roster_field(k, "Height"),
+            roster_field(k, "Weight"),
             roster_field(k, "Class"),
             roster_field(k, "Pos"),
             min_per_game(agg),
         ]
 
-    MID_COLS = ["Cost", "Ht", "Wt", "Class", "Pos", "Min/G"]
+    MID_COLS = ["Cost", "Height", "Weight", "Class", "Pos", "Min/G"]
 
     # ---------- FG% ----------
     fg_rows = []
