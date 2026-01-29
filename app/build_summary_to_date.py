@@ -1,184 +1,109 @@
 import os
 import re
-import html
-from datetime import datetime
+import sys
 from bs4 import BeautifulSoup
 
 DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "docs")
-OUT_HTML = os.path.join(DOCS_DIR, "SummaryToDate.html")
 
-# We will aggregate from these snapshot files created by Final runs
-FINAL_OWNERS_RE = re.compile(r"^Final_Owners_(PD(\d+))\.html$", re.IGNORECASE)
+def pd_num_from_name(filename: str) -> int:
+    m = re.search(r"_PD(\d+)\.html$", filename)
+    return int(m.group(1)) if m else -1
 
-def parse_int(s: str) -> int:
-    try:
-        return int(float(str(s).strip()))
-    except:
-        return 0
+def cap_pd_number(arg: str | None) -> int | None:
+    if not arg:
+        return None
+    m = re.fullmatch(r"PD(\d+)", arg.strip().upper())
+    if not m:
+        raise SystemExit("Usage: python app/build_summary_to_date.py [PD7]")
+    return int(m.group(1))
 
-def extract_owner_rows(final_owners_html_path: str):
+def parse_owner_totals_from_final_owners_html(path: str) -> dict[str, int]:
     """
-    Reads one Final_Owners_PDx.html and returns list of tuples:
-      (owner, starter_pooh_total, starters_count_so_far)
-    This matches the table produced by python_today_pooh.py in write_html_tables().
+    Expects Final_Owners_PDx.html table:
+    Owner | Starter Pooh Total | Starters Count So Far
     """
-    with open(final_owners_html_path, "r", encoding="utf-8", errors="replace") as f:
-        soup = BeautifulSoup(f.read(), "lxml")
+    with open(path, "r", encoding="utf-8") as f:
+        soup = BeautifulSoup(f.read(), "html.parser")
 
     table = soup.find("table")
     if not table:
-        return []
+        return {}
 
     rows = table.find_all("tr")
-    out = []
-
-    # First row is header in your generated owners page:
-    # Owner | Starter Pooh Total | Starters Count So Far
+    out = {}
     for tr in rows[1:]:
-        tds = tr.find_all(["td", "th"])
-        if len(tds) < 3:
+        tds = tr.find_all("td")
+        if len(tds) < 2:
             continue
         owner = tds[0].get_text(strip=True)
-        pooh = parse_int(tds[1].get_text(strip=True))
-        cnt  = parse_int(tds[2].get_text(strip=True))
-        if owner:
-            out.append((owner, pooh, cnt))
-
+        total = tds[1].get_text(strip=True)
+        try:
+            out[owner] = int(total)
+        except:
+            out[owner] = 0
     return out
 
 def main():
-    os.makedirs(DOCS_DIR, exist_ok=True)
+    cap = cap_pd_number(sys.argv[1] if len(sys.argv) > 1 else None)
 
-    # Find all Final_Owners_PDx.html files and sort by PD number
-    finals = []
-    for fn in os.listdir(DOCS_DIR):
-        m = FINAL_OWNERS_RE.match(fn)
-        if m:
-            pd_label = m.group(1).upper()      # e.g. PD7
-            pd_num = int(m.group(2))           # 7
-            finals.append((pd_num, pd_label, os.path.join(DOCS_DIR, fn)))
+    files = [f for f in os.listdir(DOCS_DIR) if f.startswith("Final_Owners_PD") and f.endswith(".html")]
+    items = []
+    for f in files:
+        n = pd_num_from_name(f)
+        if n < 0:
+            continue
+        if cap is not None and n > cap:
+            continue
+        items.append((n, f))
+    items.sort()
 
-    finals.sort(key=lambda x: x[0])  # by PD number ascending
+    # Build per-PD totals + cumulative
+    per_pd = {}
+    owners_all = set()
 
-    # If no finals yet, still create a page (prevents 404 from index)
-    if not finals:
-        with open(OUT_HTML, "w", encoding="utf-8") as f:
-            f.write("<!doctype html><html><head><meta charset='utf-8'>")
-            f.write("<title>Summary of Results to Date</title>")
-            f.write("<style>body{font-family:Calibri,Arial} .wrap{width:1100px;margin:20px auto;"
-                    "border:3px solid #000;background:#FFFFCC;padding:10px}</style>")
-            f.write("</head><body><div class='wrap'>")
-            f.write("<h2>Summary of Results to Date</h2>")
-            f.write("<p>No Final PD snapshot files found yet (expected docs/Final_Owners_PD#.html).</p>")
-            f.write("</div></body></html>")
-        print(f"Wrote: {OUT_HTML} (no finals found)")
-        return
+    for n, f in items:
+        path = os.path.join(DOCS_DIR, f)
+        totals = parse_owner_totals_from_final_owners_html(path)
+        per_pd[n] = totals
+        owners_all |= set(totals.keys())
 
-    # Determine max PD present (columns 1..max_pd)
-    max_pd = finals[-1][0]
+    owners = sorted(owners_all)
 
-    # Aggregation structure:
-    # owner -> {
-    #   "per_pd": {pd_num: pooh_for_that_pd},
-    #   "total": sum,
-    #   "avg": total / number_of_pds_with_value
-    # }
-    owners = {}
+    cumulative = {o: 0 for o in owners}
 
-    for pd_num, pd_label, path in finals:
-        rows = extract_owner_rows(path)
-        for owner, pooh, _cnt in rows:
-            if owner not in owners:
-                owners[owner] = {"per_pd": {}, "total": 0}
-            owners[owner]["per_pd"][pd_num] = pooh
+    # HTML output
+    out_path = os.path.join(DOCS_DIR, "SummaryToDate.html")
+    with open(out_path, "w", encoding="utf-8") as out:
+        out.write("<!doctype html><html><head><meta charset='utf-8'>")
+        title = f"Summary To Date (through PD{cap})" if cap is not None else "Summary To Date"
+        out.write(f"<title>{title}</title>")
+        out.write("<style>body{font-family:Arial}table{border-collapse:collapse;font-size:14px}"
+                  "th,td{border:1px solid #ccc;padding:4px 6px}th{background:#eee}</style>")
+        out.write("</head><body>")
+        out.write(f"<h2>{title}</h2>")
 
-    # Compute totals/avgs
-    for owner, d in owners.items():
-        per_pd = d["per_pd"]
-        d["total"] = sum(per_pd.get(i, 0) for i in range(1, max_pd + 1))
-        completed = sum(1 for i in range(1, max_pd + 1) if i in per_pd)
-        d["completed"] = completed
-        d["avg"] = (d["total"] / completed) if completed else 0.0
+        out.write("<table><thead><tr><th>PD</th>")
+        for o in owners:
+            out.write(f"<th>{o}</th>")
+        out.write("</tr></thead><tbody>")
 
-    # Rank by total desc
-    ranked = sorted(owners.items(), key=lambda kv: kv[1]["total"], reverse=True)
+        for n, _f in items:
+            out.write(f"<tr><td>PD{n}</td>")
+            totals = per_pd.get(n, {})
+            for o in owners:
+                v = int(totals.get(o, 0))
+                cumulative[o] += v
+                out.write(f"<td>{v}</td>")
+            out.write("</tr>")
 
-    # Helper: "Out of 1st/2nd/3rd" computed from totals
-    totals_list = [d["total"] for _, d in ranked]
-    first = totals_list[0] if len(totals_list) >= 1 else 0
-    second = totals_list[1] if len(totals_list) >= 2 else None
-    third = totals_list[2] if len(totals_list) >= 3 else None
+        out.write("<tr><th>CUM</th>")
+        for o in owners:
+            out.write(f"<th>{cumulative[o]}</th>")
+        out.write("</tr>")
 
-    def esc(x):
-        return html.escape("" if x is None else str(x))
+        out.write("</tbody></table></body></html>")
 
-    # Write HTML styled like your example sheet output (Calibri, gray header, borders)
-    # You said: drop last column, and second-to-last can be blank for now.
-    # In your example, last 3 columns are:
-    #  - Avg Pooh Per Completed PD
-    #  - Sum of Avgs, Top 5 Eligible   (2nd-to-last)  <-- leave blank
-    #  - Remaining Current PD         (last)          <-- omit entirely
-    updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    with open(OUT_HTML, "w", encoding="utf-8") as f:
-        f.write("<!doctype html><html><head><meta charset='utf-8'>")
-        f.write("<title>Sorted League Results</title>")
-        f.write("<style>"
-                "body{font-family:Calibri,Arial;background:#ffffff}"
-                "table{border-collapse:collapse;font-size:11pt}"
-                "th,td{border:1px solid #000;padding:4px 6px}"
-                "th{background:#c0c0c0}"
-                "caption{font-weight:bold;margin-bottom:8px}"
-                ".wrap{width:1400px;margin:20px auto}"
-                "</style>")
-        f.write("</head><body><div class='wrap'>")
-
-        f.write("<table>")
-        f.write("<caption>Sorted League Results</caption>")
-        f.write(f"<tr><td colspan='{5 + max_pd + 2}' "
-                "style='border:none;padding:0 0 10px 0;'>"
-                f"<b>Included PDs:</b> 1–{max_pd} &nbsp;&nbsp; "
-                f"<b>Last updated:</b> {esc(updated)}"
-                "</td></tr>")
-
-        # Header
-        f.write("<thead><tr>")
-        f.write("<th>Team Name</th>")
-        f.write("<th>Total Pooh</th>")
-        f.write("<th>Out Of 1st</th>")
-        f.write("<th>Out Of 2nd</th>")
-        f.write("<th>Out Of 3rd</th>")
-        for i in range(1, max_pd + 1):
-            f.write(f"<th>{i}</th>")
-        f.write("<th>Avg Pooh Per Completed PD</th>")
-        f.write("<th>Sum of Avgs, Top 5 Eligible</th>")  # blank for now
-        f.write("</tr></thead><tbody>")
-
-        # Rows
-        for idx, (owner, d) in enumerate(ranked):
-            total = d["total"]
-            out1 = "---" if idx == 0 else str(first - total)
-            out2 = "---" if idx <= 1 or second is None else str(second - total)
-            out3 = "---" if idx <= 2 or third is None else str(third - total)
-
-            f.write("<tr>")
-            f.write(f"<td>{esc(owner)}</td>")
-            f.write(f"<td style='text-align:right'>{total}</td>")
-            f.write(f"<td style='text-align:right'>{esc(out1)}</td>")
-            f.write(f"<td style='text-align:right'>{esc(out2)}</td>")
-            f.write(f"<td style='text-align:right'>{esc(out3)}</td>")
-
-            for i in range(1, max_pd + 1):
-                val = d["per_pd"].get(i, "")
-                f.write(f"<td style='text-align:right'>{esc(val)}</td>")
-
-            f.write(f"<td style='text-align:right'>{d['avg']:.1f}</td>")
-            f.write("<td style='text-align:right'></td>")  # blank for now
-            f.write("</tr>")
-
-        f.write("</tbody></table></div></body></html>")
-
-    print(f"Wrote: {OUT_HTML}")
+    print(f"Wrote: {out_path}")
 
 if __name__ == "__main__":
     main()
