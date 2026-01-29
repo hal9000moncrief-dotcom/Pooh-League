@@ -23,11 +23,15 @@ on:
 permissions:
   contents: write
 
+# Prevent scheduled/manual runs (or two manual runs) from stomping on each other
+concurrency:
+  group: pooh-points
+  cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      # Make runner commands (and any Python that respects TZ) align with you
       TZ: America/Chicago
 
     steps:
@@ -54,17 +58,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Defaults for scheduled runs (no inputs exist on schedule)
           RUN_MODE="normal"
           DATE_INPUT=""
 
-          # If this is a manual run, take the provided inputs
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             RUN_MODE="${INPUT_RUN_MODE:-normal}"
             DATE_INPUT="${INPUT_DATE:-}"
           fi
 
-          # If no date provided, compute "today" in America/Chicago to avoid UTC rollover issues
           if [[ -z "$DATE_INPUT" ]]; then
             DATE_LOCAL="$(TZ='America/Chicago' date +%Y%m%d)"
           else
@@ -88,7 +89,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Final Run requires an explicit typed date (not blank)
           if [[ "${{ github.event_name }}" != "workflow_dispatch" ]]; then
             echo "ERROR: Final Run is only allowed for manual workflow_dispatch."
             exit 1
@@ -113,7 +113,6 @@ jobs:
           if not re.fullmatch(r"\d{8}", yyyymmdd):
             raise SystemExit(f"ERROR: date must be YYYYMMDD (8 digits). Got: {yyyymmdd}")
 
-          # Convert YYYYMMDD -> MMDDYYYY to match your PD.xlsx display intent
           yyyy = yyyymmdd[0:4]
           mm   = yyyymmdd[4:6]
           dd   = yyyymmdd[6:8]
@@ -123,33 +122,23 @@ jobs:
           ws = wb.active
 
           def norm_to_mmddyyyy(v):
-            """Normalize Excel cell value to MMDDYYYY (8 digits) if possible."""
             if v is None:
               return None
-
             if isinstance(v, datetime):
               return v.strftime("%m%d%Y")
             if isinstance(v, date):
               return v.strftime("%m%d%Y")
-
             if isinstance(v, (int, float)):
               iv = int(v)
-
-              # Excel serial date
               if 30000 <= iv <= 80000:
                 d = date(1899, 12, 30) + timedelta(days=iv)
                 return d.strftime("%m%d%Y")
-
               s = str(iv)
-              if len(s) <= 8:
-                return s.zfill(8)
-              return None
+              return s.zfill(8) if len(s) <= 8 else None
 
             s = str(v).strip()
-
             m = re.match(r"^(\d{8})(?:\.0)?$", s)
-            if m:
-              return m.group(1)
+            if m: return m.group(1)
 
             m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", s)
             if m:
@@ -162,8 +151,7 @@ jobs:
               return f"{int(mo):02d}{int(da):02d}{int(yr):04d}"
 
             m = re.match(r"^(\d{6,8})(?:\.0)?$", s)
-            if m:
-              return m.group(1).zfill(8)
+            if m: return m.group(1).zfill(8)
 
             return None
 
@@ -178,7 +166,7 @@ jobs:
 
           if found is None:
             raise SystemExit(
-              f"ERROR: Date {yyyymmdd} (MMDDYYYY={target_mmddyyyy}) does not correspond to a Play Date in app/PD.xlsx. Aborting Final Run."
+              f"ERROR: Date {yyyymmdd} (MMDDYYYY={target_mmddyyyy}) does not correspond to a Play Date in app/PD.xlsx."
             )
 
           pdnum = str(found).strip().replace(".0", "")
@@ -200,31 +188,6 @@ jobs:
           echo "Running script for date $DATE_LOCAL"
           python -u app/python_today_pooh.py "$DATE_LOCAL"
 
-      - name: If Final Run, create Final_* copies for that PD
-        if: ${{ steps.params.outputs.run_mode == 'final' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PD="$(cat pd_resolved.txt)"
-          echo "Creating Final_* copies for $PD from today_*.html"
-
-          if [[ ! -f "docs/today_players.html" ]]; then
-            echo "ERROR: Missing docs/today_players.html"
-            exit 1
-          fi
-          if [[ ! -f "docs/today_owners.html" ]]; then
-            echo "ERROR: Missing docs/today_owners.html"
-            exit 1
-          fi
-
-          cp -f "docs/today_players.html" "docs/Final_Players_${PD}.html"
-          cp -f "docs/today_owners.html"  "docs/Final_Owners_${PD}.html"
-
-          echo "Created:"
-          echo "  docs/Final_Players_${PD}.html"
-          echo "  docs/Final_Owners_${PD}.html"
-
       - name: Build Summary of Results to Date (Final runs only)
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
@@ -245,6 +208,44 @@ jobs:
           set -euo pipefail
           python -u app/build_schedule_html.py
 
+      # Guardrail: if any build step accidentally modified Final_* files, fail before we copy
+      - name: Guard: Final_* must not change before snapshot
+        if: ${{ steps.params.outputs.run_mode == 'final' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git status --porcelain docs/Final_*.html | grep .; then
+            echo "ERROR: A build step modified docs/Final_*.html before snapshot copy. Aborting."
+            git status --porcelain docs/Final_*.html
+            exit 1
+          fi
+
+      # IMPORTANT: Snapshot copy must be LAST so later steps can't overwrite finals
+      - name: If Final Run, create Final_* copies for that PD (LAST)
+        if: ${{ steps.params.outputs.run_mode == 'final' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PD="$(cat pd_resolved.txt)"
+          echo "Creating Final_* copies for $PD from today_*.html (snapshot written last)"
+
+          if [[ ! -f "docs/today_players.html" ]]; then
+            echo "ERROR: Missing docs/today_players.html"
+            exit 1
+          fi
+          if [[ ! -f "docs/today_owners.html" ]]; then
+            echo "ERROR: Missing docs/today_owners.html"
+            exit 1
+          fi
+
+          cp -f "docs/today_players.html" "docs/Final_Players_${PD}.html"
+          cp -f "docs/today_owners.html"  "docs/Final_Owners_${PD}.html"
+
+          echo "Created:"
+          echo "  docs/Final_Players_${PD}.html"
+          echo "  docs/Final_Owners_${PD}.html"
+
       - name: Commit site updates if changed
         shell: bash
         run: |
@@ -258,5 +259,14 @@ jobs:
           git config user.name "pooh-bot"
           git config user.email "pooh-bot@users.noreply.github.com"
           git add docs/
-          git commit -m "Update Pooh Points site"
+
+          # Make commits self-identifying (mode/date/PD) to make debugging easy
+          MSG="Pooh Points: ${{ steps.params.outputs.run_mode }} ${{ steps.params.outputs.date_yyyymmdd }}"
+          if [[ -f pd_resolved.txt ]]; then
+            MSG="$MSG -> $(cat pd_resolved.txt)"
+          fi
+          git commit -m "$MSG"
+
+          # Be robust if another run pushed recently
+          git pull --rebase origin "${GITHUB_REF_NAME}"
           git push
