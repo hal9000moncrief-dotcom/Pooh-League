@@ -84,7 +84,6 @@ jobs:
           echo "Run mode: $RUN_MODE"
           echo "Effective date (America/Chicago when blank): $DATE_LOCAL"
 
-      # Expects app/resolve_pd.py to exist (the helper that writes pd_resolved.txt)
       - name: Validate Final Run date maps to a Play Date (PDx)
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
@@ -125,7 +124,6 @@ jobs:
           ls -la docs/today_players.html docs/today_owners.html
           git status --porcelain docs/today_players.html docs/today_owners.html || true
 
-      # Guardrail: ensure no earlier step touched Final files (prevents accidental overwrites)
       - name: "Guard: Final_* must not change before snapshot"
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
@@ -137,8 +135,6 @@ jobs:
             exit 1
           fi
 
-      # Snapshot copy must happen BEFORE summaries so summaries include the freshly written PD file,
-      # and so we can cap summaries "through PDx".
       - name: "If Final Run, create Final_* copies for that PD"
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
@@ -157,8 +153,6 @@ jobs:
           echo "  docs/Final_Players_${PD}.html"
           echo "  docs/Final_Owners_${PD}.html"
 
-      # Build summaries AFTER snapshot so they see the newest Final_*,
-      # and CAP summaries through the PD you just finalized.
       - name: Build summaries (Final runs only, capped through PD)
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
@@ -169,13 +163,21 @@ jobs:
           python -u app/build_summary_to_date.py "$PD"
           python -u app/build_player_pooh_summary.py "$PD"
 
+      - name: Build stat pages from ESPN (Final runs only, capped through PD)
+        if: ${{ steps.params.outputs.run_mode == 'final' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PD="$(cat pd_resolved.txt)"
+          echo "Building stat pages from ESPN capped through $PD"
+          python -u app/build_stat_pages.py "$PD"
+
       - name: Build Schedule page (HTML)
         shell: bash
         run: |
           set -euo pipefail
           python -u app/build_schedule_html.py
 
-      # Ensure today_* are staged on FINAL runs so they get committed even if other steps run.
       - name: Ensure today_* are staged (Final runs only)
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
@@ -193,7 +195,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Stage everything under docs/ (includes today_* + Final_* + summaries + schedule)
           git add docs/
 
           if [[ -z "$(git status --porcelain docs/)" ]]; then
