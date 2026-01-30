@@ -11,6 +11,7 @@ DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "docs")
 APP_DIR  = os.path.join(os.path.dirname(__file__), "..", "app")
 
 ROSTERS_XLSX = os.path.join(APP_DIR, "rosters.xlsx")
+TEAM_NAMES_XLSX = os.path.join(DOCS_DIR, "Team_Names.xlsx")
 
 OUT_PLAYER = os.path.join(DOCS_DIR, "Player_Pooh_Summary.html")
 OUT_BY_TEAM = os.path.join(DOCS_DIR, "Pooh_Summary_By_Team.html")
@@ -79,13 +80,61 @@ def idx(headers_l: List[str], *cands: str) -> Optional[int]:
     return None
 
 # ----------------------------
+# Team Names Map (Owner -> Team Name)
+# ----------------------------
+def load_team_name_map() -> Dict[str, str]:
+    """
+    docs/Team_Names.xlsx:
+      headers: Owner, Team Name
+    """
+    if not os.path.exists(TEAM_NAMES_XLSX):
+        print(f"NOTE: Missing {TEAM_NAMES_XLSX}. Using names as-is.")
+        return {}
+
+    wb = load_workbook(TEAM_NAMES_XLSX, data_only=True)
+    ws = wb.active
+
+    headers = [("" if c.value is None else str(c.value).strip()) for c in ws[1]]
+    headers_l = [h.lower() for h in headers]
+
+    def col(name: str) -> Optional[int]:
+        n = name.lower()
+        if n in headers_l:
+            return headers_l.index(n) + 1
+        return None
+
+    c_owner = col("Owner")
+    c_team  = col("Team Name")
+    if not c_owner or not c_team:
+        raise SystemExit("ERROR: docs/Team_Names.xlsx must have headers: Owner, Team Name")
+
+    m: Dict[str, str] = {}
+    for r in range(2, ws.max_row + 1):
+        old = ws.cell(row=r, column=c_owner).value
+        new = ws.cell(row=r, column=c_team).value
+        old_s = "" if old is None else str(old).strip()
+        new_s = "" if new is None else str(new).strip()
+        if old_s and new_s:
+            m[old_s] = new_s
+
+    return m
+
+def display_team(name: str, team_map: Dict[str, str]) -> str:
+    s = (name or "").strip()
+    if not s:
+        return s
+    if s == "Undrafted":
+        return s
+    return team_map.get(s, s)
+
+# ----------------------------
 # Load rosters.xlsx (bio fields)
 # ----------------------------
-def load_rosters() -> Dict[str, dict]:
+def load_rosters(team_map: Dict[str, str]) -> Dict[str, dict]:
     """
-    Your rosters.xlsx headers (per screenshot):
+    rosters.xlsx headers (per screenshot):
       Name, Order, Cost, Owner, Team, Height, Weight, Class, Position
-    We'll treat Owner as "Team Name".
+    We'll treat Owner as "Team Name" (but display via Team_Names.xlsx mapping).
     """
     if not os.path.exists(ROSTERS_XLSX):
         raise SystemExit(f"ERROR: Missing {ROSTERS_XLSX}")
@@ -109,28 +158,36 @@ def load_rosters() -> Dict[str, dict]:
     c_cost   = col("cost")
     c_owner  = col("owner", "team name")
     c_team   = col("team")
-    c_height = col("height")
-    c_weight = col("weight")
+    c_height = col("height", "ht")
+    c_weight = col("weight", "wt")
     c_class  = col("class")
-    c_pos    = col("position")
+    c_pos    = col("position", "pos")
+
+    def sval(r: int, c: Optional[int]) -> str:
+        if c is None:
+            return ""
+        v = ws.cell(row=r, column=c).value
+        return "" if v is None else str(v).strip()
 
     out: Dict[str, dict] = {}
     for r in range(2, ws.max_row + 1):
-        name = ws.cell(row=r, column=c_name).value
-        name = "" if name is None else str(name).strip()
+        name = sval(r, c_name)
         if not name:
             continue
         key = norm_name(name)
 
+        owner_raw = sval(r, c_owner)
+        owner_disp = display_team(owner_raw, team_map)
+
         out[key] = {
             "Name": name,
-            "Cost": "" if c_cost is None else ("" if ws.cell(row=r, column=c_cost).value is None else str(ws.cell(row=r, column=c_cost).value).strip()),
-            "Team Name": "" if c_owner is None else ("" if ws.cell(row=r, column=c_owner).value is None else str(ws.cell(row=r, column=c_owner).value).strip()),
-            "Team": "" if c_team is None else ("" if ws.cell(row=r, column=c_team).value is None else str(ws.cell(row=r, column=c_team).value).strip()),
-            "Height": "" if c_height is None else ("" if ws.cell(row=r, column=c_height).value is None else str(ws.cell(row=r, column=c_height).value).strip()),
-            "Weight": "" if c_weight is None else ("" if ws.cell(row=r, column=c_weight).value is None else str(ws.cell(row=r, column=c_weight).value).strip()),
-            "Class": "" if c_class is None else ("" if ws.cell(row=r, column=c_class).value is None else str(ws.cell(row=r, column=c_class).value).strip()),
-            "Position": "" if c_pos is None else ("" if ws.cell(row=r, column=c_pos).value is None else str(ws.cell(row=r, column=c_pos).value).strip()),
+            "Cost": sval(r, c_cost),
+            "Team Name": owner_disp,   # DISPLAY name
+            "Team": sval(r, c_team),
+            "Height": sval(r, c_height),
+            "Weight": sval(r, c_weight),
+            "Class": sval(r, c_class),
+            "Position": sval(r, c_pos),
         }
 
     return out
@@ -138,14 +195,15 @@ def load_rosters() -> Dict[str, dict]:
 # ----------------------------
 # Load Final_Players_PD*.html (pooh per PD + stat totals)
 # ----------------------------
-def load_final_player_data(cap_pd: Optional[int]):
+def load_final_player_data(cap_pd: Optional[int], team_map: Dict[str, str]):
     """
     Returns:
       max_pd
-      pooh_by_player_pd[player_norm][pd] = pooh   (ONLY when player appears in boxscore for that PD)
-      agg_stats[player_norm] = totals across included PDs:
-         min, pts, reb, ast, stl, blk, to
-      owner_by_player[player_norm] = owner (from Final files when available)
+      pooh_by_player_pd[player_norm][pd] = pooh (int)  (only if player appears)
+      played_by_player[player_norm] = set(pd) where player appears in box score
+      agg_stats[player_norm] totals across included PDs:
+         games, min, pts, reb, ast, stl, blk, to
+      owner_by_player[player_norm] = DISPLAY team name (mapped)
     """
     files = []
     for fn in os.listdir(DOCS_DIR):
@@ -163,7 +221,9 @@ def load_final_player_data(cap_pd: Optional[int]):
     max_pd = files[-1][0]
 
     pooh_by_player_pd: Dict[str, Dict[int, int]] = defaultdict(dict)
-    agg = defaultdict(lambda: {"min": 0.0, "pts": 0, "reb": 0, "ast": 0, "stl": 0, "blk": 0, "to": 0})
+    played_by_player: Dict[str, set] = defaultdict(set)
+
+    agg = defaultdict(lambda: {"games": 0, "min": 0.0, "pts": 0, "reb": 0, "ast": 0, "stl": 0, "blk": 0, "to": 0})
     owner_by_player: Dict[str, str] = {}
 
     for pd, fn in files:
@@ -186,9 +246,6 @@ def load_final_player_data(cap_pd: Optional[int]):
         if i_player is None or i_pooh is None:
             continue
 
-        # Safety: only count a player once per PD file
-        seen_this_pd = set()
-
         for r in rows:
             if i_player >= len(r):
                 continue
@@ -196,13 +253,15 @@ def load_final_player_data(cap_pd: Optional[int]):
             key = norm_name(pname)
             if not key:
                 continue
-            if key in seen_this_pd:
-                continue
-            seen_this_pd.add(key)
+
+            # Mark as played for this PD (player appears in box score)
+            played_by_player[key].add(pd)
 
             pooh = safe_int(r[i_pooh]) if i_pooh < len(r) else 0
             pooh_by_player_pd[key][pd] = pooh
 
+            # Count as a game played for that PD.
+            agg[key]["games"] += 1
             if i_min is not None and i_min < len(r):
                 agg[key]["min"] += safe_float(r[i_min])
             if i_pts is not None and i_pts < len(r):
@@ -218,17 +277,18 @@ def load_final_player_data(cap_pd: Optional[int]):
             if i_to is not None and i_to < len(r):
                 agg[key]["to"] += safe_int(r[i_to])
 
+            # Owner/team name (map for display)
             if i_owner is not None and i_owner < len(r):
-                ow = r[i_owner].strip()
-                if ow:
-                    owner_by_player[key] = ow
+                ow_raw = r[i_owner].strip()
+                if ow_raw:
+                    owner_by_player[key] = display_team(ow_raw, team_map)
 
-    return max_pd, pooh_by_player_pd, agg, owner_by_player
+    return max_pd, pooh_by_player_pd, played_by_player, agg, owner_by_player
 
 # ----------------------------
 # Write HTML
 # ----------------------------
-NUM_COLS = {"Cost","Min/G","Avg","Total","PPG","R/G","A/G","B/G","S/G","T/G"}
+NUM_COLS = {"Cost", "Min/G", "Avg", "Total", "PPG", "R/G", "A/G", "B/G", "S/G", "T/G"}
 
 def write_html(out_path: str, cols: List[str], rows: List[Dict[str, str]], title: str):
     with open(out_path, "w", encoding="utf-8") as out:
@@ -270,28 +330,43 @@ def write_html(out_path: str, cols: List[str], rows: List[Dict[str, str]], title
 def main():
     cap_pd = parse_cap_pd(sys.argv)
 
-    rosters = load_rosters()
-    max_pd, pooh_by_player_pd, agg, owner_by_player = load_final_player_data(cap_pd)
+    team_map = load_team_name_map()
+    if team_map:
+        print(f"Loaded Team_Names mapping entries: {len(team_map)}")
+    else:
+        print("No Team_Names mapping loaded (using names as-is).")
 
-    fixed_cols = ["Team Name","Cost","Name","Team","Height","Weight","Class","Position","Min/G","Avg","Total"]
+    rosters = load_rosters(team_map)
+    max_pd, pooh_by_player_pd, played_by_player, agg, owner_by_player = load_final_player_data(cap_pd, team_map)
+
+    # Columns EXACTLY as you requested (with spelled-out Height/Weight)
+    fixed_cols = ["Team Name", "Cost", "Name", "Team", "Height", "Weight", "Class", "Position", "Min/G", "Avg", "Total"]
     pd_cols = [str(i) for i in range(1, max_pd + 1)]
-    tail_cols = ["PPG","R/G","A/G","B/G","S/G","T/G"]
+    tail_cols = ["PPG", "R/G", "A/G", "B/G", "S/G", "T/G"]
     cols = fixed_cols + pd_cols + tail_cols
 
     rows_out: List[Dict[str, str]] = []
 
+    # Build rows from roster list (keeps every rostered player even if they never played)
     for key, info in rosters.items():
-        player_pd_map = pooh_by_player_pd.get(key, {})
-        games_played = len(player_pd_map)
+        played_set = played_by_player.get(key, set())
 
-        pd_vals_present = [player_pd_map[pd] for pd in range(1, max_pd + 1) if pd in player_pd_map]
-        total_pooh = sum(pd_vals_present)
-        avg_pooh = (total_pooh / games_played) if games_played > 0 else 0.0
+        # PD cells: blank if not played; otherwise number (including 0)
+        total_pooh = 0
+        played_count = 0
+        for pd in range(1, max_pd + 1):
+            if pd in played_set:
+                v = pooh_by_player_pd.get(key, {}).get(pd, 0)
+                total_pooh += int(v)
+                played_count += 1
 
-        g = agg.get(key, {"min": 0.0, "pts": 0, "reb": 0, "ast": 0, "stl": 0, "blk": 0, "to": 0})
+        avg_pooh = (total_pooh / played_count) if played_count > 0 else 0.0
+
+        g = agg.get(key, {"games": 0, "min": 0.0, "pts": 0, "reb": 0, "ast": 0, "stl": 0, "blk": 0, "to": 0})
+        games = g["games"] if g else 0
 
         def per_game(n: float) -> float:
-            return (n / games_played) if games_played > 0 else 0.0
+            return (n / games) if games > 0 else 0.0
 
         min_g = per_game(g["min"])
         ppg   = per_game(g["pts"])
@@ -301,17 +376,18 @@ def main():
         spg   = per_game(g["stl"])
         tpg   = per_game(g["to"])
 
-        team_name = owner_by_player.get(key) or info.get("Team Name", "")
+        # Prefer owner from Final files; else roster value. Both already display-mapped.
+        team_name_disp = owner_by_player.get(key) or info.get("Team Name", "")
 
         row = {
-            "Team Name": team_name,
-            "Cost": info.get("Cost",""),
-            "Name": info.get("Name",""),
-            "Team": info.get("Team",""),
-            "Height": info.get("Height",""),
-            "Weight": info.get("Weight",""),
-            "Class": info.get("Class",""),
-            "Position": info.get("Position",""),
+            "Team Name": team_name_disp,
+            "Cost": info.get("Cost", ""),
+            "Name": info.get("Name", ""),
+            "Team": info.get("Team", ""),
+            "Height": info.get("Height", ""),
+            "Weight": info.get("Weight", ""),
+            "Class": info.get("Class", ""),
+            "Position": info.get("Position", ""),
             "Min/G": f"{min_g:.1f}",
             "Avg": f"{avg_pooh:.2f}",
             "Total": str(total_pooh),
@@ -324,27 +400,24 @@ def main():
         }
 
         for pd in range(1, max_pd + 1):
-            if pd in player_pd_map:
-                row[str(pd)] = str(player_pd_map[pd])
+            if pd in played_set:
+                row[str(pd)] = str(pooh_by_player_pd.get(key, {}).get(pd, 0))
             else:
-                row[str(pd)] = ""
+                row[str(pd)] = ""  # BLANK if not played / not in box score
 
         rows_out.append(row)
 
-    # ✅ FIX: Player summary sort by Avg desc, then Total desc, then Name asc
-    def sort_key_players(r):
-        avg = safe_float(r.get("Avg", "0"))
-        total = safe_int(r.get("Total", "0"))
-        name = (r.get("Name") or "")
-        return (-avg, -total, name)
-
-    rows_players = sorted(rows_out, key=sort_key_players)
+    # 1) Player_Pooh_Summary.html: sort by Avg desc (new rules), then Total desc, then Name
+    rows_players = sorted(
+        rows_out,
+        key=lambda r: (-safe_float(r.get("Avg", "0")), -safe_int(r.get("Total", "0")), r.get("Name", ""))
+    )
     write_html(OUT_PLAYER, cols, rows_players, title="Player Pooh Summary")
 
-    # By-team sort (unchanged): Team asc, then Avg desc, then Name asc
+    # 2) Pooh_Summary_By_Team.html: sort by Team Name (asc), then Avg desc, then Name
     def sort_key_by_team_then_avg(r):
         team = (r.get("Team Name") or "").strip().lower()
-        avg = safe_float(r.get("Avg", "0"))
+        avg = safe_float(r.get("Avg", 0))
         name = (r.get("Name") or "")
         return (team, -avg, name)
 
