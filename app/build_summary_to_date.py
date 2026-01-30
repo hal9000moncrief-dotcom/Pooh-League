@@ -4,7 +4,10 @@ import sys
 from collections import defaultdict
 from bs4 import BeautifulSoup
 
+from openpyxl import load_workbook
+
 DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "docs")
+TEAM_NAMES_XLSX = os.path.join(DOCS_DIR, "Team_Names.xlsx")
 
 
 def parse_cap_pd(argv) -> int | None:
@@ -53,8 +56,64 @@ def read_owner_totals_from_final_owners_html(path: str) -> dict[str, int]:
     return out
 
 
+# ----------------------------
+# Team Names Map (Owner -> Team Name)
+# ----------------------------
+def load_team_name_map() -> dict[str, str]:
+    """
+    docs/Team_Names.xlsx:
+      headers: Owner, Team Name
+    """
+    if not os.path.exists(TEAM_NAMES_XLSX):
+        print(f"NOTE: Missing {TEAM_NAMES_XLSX}. Using names as-is.")
+        return {}
+
+    wb = load_workbook(TEAM_NAMES_XLSX, data_only=True)
+    ws = wb.active
+
+    headers = [("" if c.value is None else str(c.value).strip()) for c in ws[1]]
+    headers_l = [h.lower() for h in headers]
+
+    def col(name: str) -> int | None:
+        n = name.lower()
+        if n in headers_l:
+            return headers_l.index(n) + 1
+        return None
+
+    c_owner = col("Owner")
+    c_team = col("Team Name")
+    if not c_owner or not c_team:
+        raise SystemExit("ERROR: docs/Team_Names.xlsx must have headers: Owner, Team Name")
+
+    m: dict[str, str] = {}
+    for r in range(2, ws.max_row + 1):
+        old = ws.cell(row=r, column=c_owner).value
+        new = ws.cell(row=r, column=c_team).value
+        old_s = "" if old is None else str(old).strip()
+        new_s = "" if new is None else str(new).strip()
+        if old_s and new_s:
+            m[old_s] = new_s
+
+    return m
+
+
+def display_team(name: str, team_map: dict[str, str]) -> str:
+    s = (name or "").strip()
+    if not s:
+        return s
+    if s == "Undrafted":
+        return s
+    return team_map.get(s, s)
+
+
 def main():
     cap_pd = parse_cap_pd(sys.argv)
+
+    team_map = load_team_name_map()
+    if team_map:
+        print(f"Loaded Team_Names mapping entries: {len(team_map)}")
+    else:
+        print("No Team_Names mapping loaded (using names as-is).")
 
     # Find Final_Owners_PD*.html
     pd_files: list[tuple[int, str]] = []
@@ -99,8 +158,11 @@ def main():
         owner_total[owner] = total
         owner_avg[owner] = (total / completed_pd_count) if completed_pd_count > 0 else 0.0
 
-    # Sort by Total Pooh descending
-    owners_sorted = sorted(owners, key=lambda o: (-owner_total.get(o, 0), o))
+    # Sort by Total Pooh descending (keep stable), tie-break by display name
+    owners_sorted = sorted(
+        owners,
+        key=lambda o: (-owner_total.get(o, 0), display_team(o, team_map))
+    )
 
     # Reference totals for Out Of 1st/2nd/3rd
     top1 = owner_total.get(owners_sorted[0], 0) if len(owners_sorted) >= 1 else 0
@@ -151,8 +213,10 @@ def main():
             out2 = max(0, top2 - total)
             out3 = max(0, top3 - total)
 
+            owner_disp = display_team(owner, team_map)
+
             out.write("<tr>")
-            out.write(f"<td>{owner}</td>")
+            out.write(f"<td>{owner_disp}</td>")
             out.write(f"<td class='num'>{total}</td>")
             out.write(f"<td class='num'>{out1}</td>")
             out.write(f"<td class='num'>{out2}</td>")
