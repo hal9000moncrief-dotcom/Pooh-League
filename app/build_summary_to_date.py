@@ -2,8 +2,9 @@ import os
 import re
 import sys
 from collections import defaultdict
-from bs4 import BeautifulSoup
+from typing import Optional
 
+from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 
 DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "docs")
@@ -26,11 +27,90 @@ def pd_num_from_filename(fn: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+# ----------------------------
+# Team name map (Owner -> Team Name)
+# ----------------------------
+def load_team_name_map() -> dict[str, str]:
+    """
+    docs/Team_Names.xlsx
+      headers: Owner, Team Name
+      Owner = old name
+      Team Name = new display name
+    """
+    if not os.path.exists(TEAM_NAMES_XLSX):
+        print(f"NOTE: Missing {TEAM_NAMES_XLSX}. Team Name will display as-is.")
+        return {}
+
+    wb = load_workbook(TEAM_NAMES_XLSX, data_only=True)
+    ws = wb.active
+
+    headers = [("" if c.value is None else str(c.value).strip()) for c in ws[1]]
+    headers_l = [h.lower() for h in headers]
+
+    def col(name: str) -> Optional[int]:
+        n = name.lower()
+        if n in headers_l:
+            return headers_l.index(n) + 1
+        return None
+
+    c_owner = col("Owner")
+    c_team = col("Team Name")
+    if not c_owner or not c_team:
+        raise SystemExit("ERROR: docs/Team_Names.xlsx must have headers: Owner, Team Name")
+
+    m: dict[str, str] = {}
+    for r in range(2, ws.max_row + 1):
+        old = ws.cell(row=r, column=c_owner).value
+        new = ws.cell(row=r, column=c_team).value
+        old_s = "" if old is None else str(old).strip()
+        new_s = "" if new is None else str(new).strip()
+        if old_s and new_s:
+            m[old_s] = new_s
+
+    print(f"Loaded Team_Names mapping entries: {len(m)}")
+    return m
+
+
+# ----------------------------
+# Owner normalization (fixes PD8 "looks same but isn't")
+# ----------------------------
+_DASHES = {
+    "\u2010",  # hyphen
+    "\u2011",  # non-breaking hyphen
+    "\u2012",  # figure dash
+    "\u2013",  # en dash
+    "\u2014",  # em dash
+    "\u2212",  # minus sign
+}
+
+def canon_owner_key(s: str) -> str:
+    """
+    Canonical key used for grouping owners across PD files.
+    Normalizes unicode dashes, weird spaces, casing, and punctuation spacing.
+    """
+    s = "" if s is None else str(s)
+    s = s.replace("\u00A0", " ")  # NBSP -> normal space
+    for d in _DASHES:
+        s = s.replace(d, "-")
+    s = s.strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def display_team_name(owner_raw: str, team_map: dict[str, str]) -> str:
+    s = (owner_raw or "").strip()
+    if not s:
+        return s
+    if s == "Undrafted":
+        return s
+    return team_map.get(s, s)
+
+
 def read_owner_totals_from_final_owners_html(path: str) -> dict[str, int]:
     """
     Reads docs/Final_Owners_PDx.html table like:
       Owner | Starter Pooh Total | Starters Count So Far
-    Returns {owner: starter_pooh_total}.
+    Returns {owner_raw: starter_pooh_total}.
     """
     with open(path, "r", encoding="utf-8") as f:
         soup = BeautifulSoup(f.read(), "html.parser")
@@ -56,64 +136,9 @@ def read_owner_totals_from_final_owners_html(path: str) -> dict[str, int]:
     return out
 
 
-# ----------------------------
-# Team Names Map (Owner -> Team Name)
-# ----------------------------
-def load_team_name_map() -> dict[str, str]:
-    """
-    docs/Team_Names.xlsx:
-      headers: Owner, Team Name
-    """
-    if not os.path.exists(TEAM_NAMES_XLSX):
-        print(f"NOTE: Missing {TEAM_NAMES_XLSX}. Using names as-is.")
-        return {}
-
-    wb = load_workbook(TEAM_NAMES_XLSX, data_only=True)
-    ws = wb.active
-
-    headers = [("" if c.value is None else str(c.value).strip()) for c in ws[1]]
-    headers_l = [h.lower() for h in headers]
-
-    def col(name: str) -> int | None:
-        n = name.lower()
-        if n in headers_l:
-            return headers_l.index(n) + 1
-        return None
-
-    c_owner = col("Owner")
-    c_team = col("Team Name")
-    if not c_owner or not c_team:
-        raise SystemExit("ERROR: docs/Team_Names.xlsx must have headers: Owner, Team Name")
-
-    m: dict[str, str] = {}
-    for r in range(2, ws.max_row + 1):
-        old = ws.cell(row=r, column=c_owner).value
-        new = ws.cell(row=r, column=c_team).value
-        old_s = "" if old is None else str(old).strip()
-        new_s = "" if new is None else str(new).strip()
-        if old_s and new_s:
-            m[old_s] = new_s
-
-    return m
-
-
-def display_team(name: str, team_map: dict[str, str]) -> str:
-    s = (name or "").strip()
-    if not s:
-        return s
-    if s == "Undrafted":
-        return s
-    return team_map.get(s, s)
-
-
 def main():
     cap_pd = parse_cap_pd(sys.argv)
-
     team_map = load_team_name_map()
-    if team_map:
-        print(f"Loaded Team_Names mapping entries: {len(team_map)}")
-    else:
-        print("No Team_Names mapping loaded (using names as-is).")
 
     # Find Final_Owners_PD*.html
     pd_files: list[tuple[int, str]] = []
@@ -132,18 +157,30 @@ def main():
 
     max_pd = pd_files[-1][0]
 
-    # per_owner_per_pd[owner][pd] = points for that PD
+    # per_owner_per_pd[owner_key][pd] = points for that PD
     per_owner_per_pd: dict[str, dict[int, int]] = defaultdict(dict)
-    owners_set = set()
+
+    # display_name_by_key[owner_key] = mapped Team Name to display
+    display_name_by_key: dict[str, str] = {}
 
     for pd, fn in pd_files:
         path = os.path.join(DOCS_DIR, fn)
         totals = read_owner_totals_from_final_owners_html(path)
-        for owner, v in totals.items():
-            owners_set.add(owner)
-            per_owner_per_pd[owner][pd] = int(v)
 
-    owners = sorted(list(owners_set))
+        for owner_raw, v in totals.items():
+            k = canon_owner_key(owner_raw)
+            per_owner_per_pd[k][pd] = int(v)
+
+            # choose a stable display name (mapped Team Name if possible)
+            disp = display_team_name(owner_raw, team_map)
+            if k not in display_name_by_key:
+                display_name_by_key[k] = disp
+            else:
+                # prefer mapped name over raw if we ever get one
+                if display_name_by_key[k] == owner_raw and disp != owner_raw:
+                    display_name_by_key[k] = disp
+
+    owner_keys = sorted(display_name_by_key.keys())
 
     # Totals + avg
     pd_list = [pd for pd, _ in pd_files]
@@ -152,16 +189,16 @@ def main():
     owner_total: dict[str, int] = {}
     owner_avg: dict[str, float] = {}
 
-    for owner in owners:
-        pd_scores = [per_owner_per_pd[owner].get(pd, 0) for pd in pd_list]
+    for k in owner_keys:
+        pd_scores = [per_owner_per_pd[k].get(pd, 0) for pd in pd_list]
         total = sum(pd_scores)
-        owner_total[owner] = total
-        owner_avg[owner] = (total / completed_pd_count) if completed_pd_count > 0 else 0.0
+        owner_total[k] = total
+        owner_avg[k] = (total / completed_pd_count) if completed_pd_count > 0 else 0.0
 
-    # Sort by Total Pooh descending (keep stable), tie-break by display name
+    # Sort by Total Pooh descending, then display name
     owners_sorted = sorted(
-        owners,
-        key=lambda o: (-owner_total.get(o, 0), display_team(o, team_map))
+        owner_keys,
+        key=lambda k: (-owner_total.get(k, 0), (display_name_by_key.get(k, "") or "").lower())
     )
 
     # Reference totals for Out Of 1st/2nd/3rd
@@ -169,7 +206,7 @@ def main():
     top2 = owner_total.get(owners_sorted[1], top1) if len(owners_sorted) >= 2 else top1
     top3 = owner_total.get(owners_sorted[2], top2) if len(owners_sorted) >= 3 else top2
 
-    # Write SummaryToDate.html with your headers
+    # Write SummaryToDate.html
     out_path = os.path.join(DOCS_DIR, "SummaryToDate.html")
 
     with open(out_path, "w", encoding="utf-8") as out:
@@ -194,42 +231,33 @@ def main():
         out.write("<th>Out Of 2nd</th>")
         out.write("<th>Out Of 3rd</th>")
 
-        # PD columns: 1..max_pd (not hardcoded 19)
         for pd in range(1, max_pd + 1):
             out.write(f"<th>{pd}</th>")
 
         out.write("<th>Avg Pooh Per Completed PD</th>")
-
-        # Keep this column but leave it blank for every row (per your instruction)
         out.write("<th>Sum of Avgs, Top 5 Eligible</th>")
-
-        # DO NOT include "Remaining Current PD"
         out.write("</tr></thead><tbody>")
 
-        for owner in owners_sorted:
-            total = owner_total.get(owner, 0)
-
+        for k in owners_sorted:
+            total = owner_total.get(k, 0)
             out1 = max(0, top1 - total)
             out2 = max(0, top2 - total)
             out3 = max(0, top3 - total)
 
-            owner_disp = display_team(owner, team_map)
+            disp = display_name_by_key.get(k, "")
 
             out.write("<tr>")
-            out.write(f"<td>{owner_disp}</td>")
+            out.write(f"<td>{disp}</td>")
             out.write(f"<td class='num'>{total}</td>")
             out.write(f"<td class='num'>{out1}</td>")
             out.write(f"<td class='num'>{out2}</td>")
             out.write(f"<td class='num'>{out3}</td>")
 
             for pd in range(1, max_pd + 1):
-                out.write(f"<td class='num'>{per_owner_per_pd[owner].get(pd, 0)}</td>")
+                out.write(f"<td class='num'>{per_owner_per_pd[k].get(pd, 0)}</td>")
 
-            out.write(f"<td class='num'>{owner_avg.get(owner, 0.0):.2f}</td>")
-
-            # Blank column on purpose
+            out.write(f"<td class='num'>{owner_avg.get(k, 0.0):.2f}</td>")
             out.write("<td class='num'></td>")
-
             out.write("</tr>")
 
         out.write("</tbody></table></body></html>")
