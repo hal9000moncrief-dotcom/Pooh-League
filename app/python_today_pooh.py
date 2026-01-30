@@ -20,6 +20,9 @@ BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-ba
 
 DRAFT_XLSX = os.path.join(os.path.dirname(__file__), "ByCoach.xlsx")  # must be in same folder
 
+# NEW: Team name mapping lives in docs/
+TEAM_NAMES_XLSX = os.path.join(os.path.dirname(__file__), "..", "docs", "Team_Names.xlsx")
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0 Safari/537.36",
     "Accept": "application/json,text/plain,*/*",
@@ -187,9 +190,57 @@ def event_local_yyyymmdd(e: dict) -> str:
 
 
 # ----------------------------
+# TEAM NAME MAP (Owner -> Team Name)
+# ----------------------------
+def load_team_name_map(xlsx_path: str) -> Dict[str, str]:
+    """
+    docs/Team_Names.xlsx with headers:
+      Owner (old name), Team Name (new display name)
+    """
+    if not os.path.exists(xlsx_path):
+        print(f"NOTE: Team name map not found at {xlsx_path}. Using Owner names as-is.")
+        return {}
+
+    wb = load_workbook(xlsx_path, data_only=True)
+    ws = wb.active
+
+    headers = [("" if c.value is None else str(c.value).strip()) for c in ws[1]]
+    headers_l = [h.lower() for h in headers]
+
+    def col(name: str) -> Optional[int]:
+        n = name.lower()
+        if n in headers_l:
+            return headers_l.index(n) + 1
+        return None
+
+    c_owner = col("Owner")
+    c_team  = col("Team Name")
+    if not c_owner or not c_team:
+        raise SystemExit("ERROR: Team_Names.xlsx must have headers: Owner, Team Name")
+
+    m: Dict[str, str] = {}
+    for r in range(2, ws.max_row + 1):
+        old = ws.cell(row=r, column=c_owner).value
+        new = ws.cell(row=r, column=c_team).value
+        old_s = "" if old is None else str(old).strip()
+        new_s = "" if new is None else str(new).strip()
+        if old_s and new_s:
+            m[old_s] = new_s
+
+    return m
+
+def display_owner(owner: str, team_map: Dict[str, str]) -> str:
+    if not owner:
+        return owner
+    if owner == "Undrafted":
+        return owner
+    return team_map.get(owner, owner)
+
+
+# ----------------------------
 # DRAFT BOARD
 # ----------------------------
-def load_draft_board(xlsx_path: str) -> Tuple[Dict[str, dict], List[str]]:
+def load_draft_board(xlsx_path: str, team_map: Dict[str, str]) -> Tuple[Dict[str, dict], List[str]]:
     wb = load_workbook(xlsx_path)
     ws = wb.active
 
@@ -214,21 +265,24 @@ def load_draft_board(xlsx_path: str) -> Tuple[Dict[str, dict], List[str]]:
         st = ws.cell(row=r, column=col_started).value if col_started else None
 
         name = str(nm).strip() if nm else ""
-        owner = str(ow).strip() if ow else ""
+        owner_raw = str(ow).strip() if ow else ""
         started_raw = str(st).strip().lower() if st is not None else ""
         started = started_raw in ("yes", "y", "true", "1")
 
         if not name:
             continue
         key = norm_name(name)
-        if not owner:
-            owner = "Undrafted"
+
+        if not owner_raw:
+            owner_raw = "Undrafted"
+
+        owner_disp = display_owner(owner_raw, team_map)
 
         if key not in draft_map:
-            draft_map[key] = {"owner": owner, "started": started, "raw_name": name}
+            draft_map[key] = {"owner": owner_disp, "started": started, "raw_name": name}
 
-        if owner and owner != "Undrafted" and owner not in owner_order:
-            owner_order.append(owner)
+        if owner_disp and owner_disp != "Undrafted" and owner_disp not in owner_order:
+            owner_order.append(owner_disp)
 
     return draft_map, owner_order
 
@@ -452,11 +506,18 @@ def main():
     if is_final:
         title_str += " (FINAL snapshot)"
 
+    # NEW: Load Owner -> Team Name mapping (forward-only)
+    team_map = load_team_name_map(TEAM_NAMES_XLSX)
+    if team_map:
+        print(f"Loaded Team_Names mapping entries: {len(team_map)}")
+    else:
+        print("No Team_Names mapping loaded (using Owner names as-is).")
+
     print(f"RUN_MODE={run_mode}  is_final={is_final}")
     print(f"Local now (America/Chicago): {datetime.now(LOCAL_TZ).isoformat()}")
     print(f"Querying SEC scoreboard dates: {prev_yyyymmdd} and {primary_yyyymmdd}")
 
-    draft_map, owner_order = load_draft_board(DRAFT_XLSX)
+    draft_map, owner_order = load_draft_board(DRAFT_XLSX, team_map)
 
     output_dir = os.path.join(os.path.dirname(__file__), "..", "docs")
     os.makedirs(output_dir, exist_ok=True)
@@ -492,17 +553,17 @@ def main():
                 key = norm_name(p["player"])
                 info = draft_map.get(key)
                 if info:
-                    owner = info["owner"]
+                    owner_disp = info["owner"]  # already mapped to Team Name
                     started_today = "Yes" if info["started"] else "No"
                 else:
-                    owner = "Undrafted"
+                    owner_disp = "Undrafted"
                     started_today = "No"
 
                 all_rows.append({
                     "date": day_label,
                     "game": game_label,
                     "status": status_line,
-                    "owner": owner,
+                    "owner": owner_disp,
                     "started_today": started_today,
                     "team": p["team"],
                     "player": p["player"],
