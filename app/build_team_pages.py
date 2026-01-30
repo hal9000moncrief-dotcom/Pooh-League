@@ -221,7 +221,7 @@ def parse_final_players_pd_file(path: str) -> Tuple[List[str], List[dict]]:
     return headers_l, rows_out
 
 
-def load_final_player_data_and_actuals(cap_pd: Optional[int]):
+def load_final_player_data_and_actuals(cap_pd: Optional[int], team_map_rev: Dict[str, str]):
     """
     Returns:
       max_pd
@@ -248,6 +248,8 @@ def load_final_player_data_and_actuals(cap_pd: Optional[int]):
     pooh_by_player_pd: Dict[str, Dict[int, int]] = defaultdict(dict)
     agg = defaultdict(lambda: {"games": 0, "min": 0.0, "pts": 0, "reb": 0, "ast": 0, "stl": 0, "blk": 0, "to": 0})
     actual_by_owner_pd: Dict[str, Dict[int, int]] = defaultdict(dict)
+    starters_by_owner_pd: Dict[str, Dict[int, Set[str]]] = defaultdict(lambda: defaultdict(set))  # NEW
+
 
     for pd, fn in files:
         path = os.path.join(DOCS_DIR, fn)
@@ -257,10 +259,13 @@ def load_final_player_data_and_actuals(cap_pd: Optional[int]):
 
         # map indices by header names (but we already returned dict rows)
         for r in rows:
-            owner = (r.get("owner") or "").strip()
+            owner_raw = (r.get("owner") or "").strip()
             player = (r.get("player") or "").strip()
-            if not owner or not player:
+            if not owner_raw or not player:
                 continue
+            
+            # NEW: normalize owner to OLD owner name so PD1-7 (old) and PD8+ (new) both work
+            owner = team_map_rev.get(owner_raw, owner_raw)
 
             key = norm_name(player)
             if not key:
@@ -282,8 +287,10 @@ def load_final_player_data_and_actuals(cap_pd: Optional[int]):
             # ACTUAL: starters only (bold)
             if r.get("__is_starter"):
                 actual_by_owner_pd[owner][pd] = actual_by_owner_pd[owner].get(pd, 0) + pooh
+                starters_by_owner_pd[owner][pd].add(key)  # NEW: track which players were actual starters
 
-    return max_pd, pooh_by_player_pd, agg, actual_by_owner_pd
+
+    return max_pd, pooh_by_player_pd, agg, actual_by_owner_pd, starters_by_owner_pd
 
 
 # ----------------------------
@@ -487,10 +494,14 @@ def main():
     cap_pd = parse_cap_pd(sys.argv)
 
     team_map = load_team_name_map()
+    team_map_rev = {v: k for k, v in team_map.items()}  # NEW: Team Name -> Owner (old)
     rosters = load_rosters()
 
     # Load player PD values + aggregates + ACTUAL starter totals from Final_Players
-    max_pd, pooh_by_player_pd, agg, actual_by_owner_pd = load_final_player_data_and_actuals(cap_pd)
+    max_pd, pooh_by_player_pd, agg, actual_by_owner_pd, starters_by_owner_pd = load_final_player_data_and_actuals(
+        cap_pd, team_map_rev
+    )
+
 
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -512,19 +523,11 @@ def main():
         tail_cols = ["PPG","R/G","A/G","B/G","S/G","T/G"]
         cols = fixed_cols + pd_cols + tail_cols
 
-        # PD highlight: top-5 per PD for this team (purely by Pooh values; blanks ignored)
-        top5_by_pd: Dict[int, Set[str]] = {}
-        for pd in range(1, max_pd + 1):
-            vals = []
-            for k in player_keys:
-                if pd in pooh_by_player_pd.get(k, {}):
-                    vals.append((pooh_by_player_pd[k][pd], k))
-            vals.sort(key=lambda x: x[0], reverse=True)
-            top5_by_pd[pd] = set([k for _, k in vals[:5]])
-
+         # PD highlight: ACTUAL starters per PD (bold rows from Final_Players)
         pd_highlight_cells: Dict[Tuple[int, str], bool] = {}
         for pd in range(1, max_pd + 1):
-            for k in top5_by_pd.get(pd, set()):
+            starter_keys = starters_by_owner_pd.get(owner_old, {}).get(pd, set())
+            for k in starter_keys:
                 pd_highlight_cells[(pd, k)] = True
 
         # Build player rows
