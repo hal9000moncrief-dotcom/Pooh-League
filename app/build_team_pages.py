@@ -411,19 +411,33 @@ def write_team_page(
         out.write(f"<title>{esc(team_title)}</title>")
         out.write("""
 <style>
-body{font-family:Arial;background:#ffffff}
-.wrapper{width:1400px;margin:20px auto;border:3px solid #000;background:#FFFFCC;padding:10px}
-h1{font-size:28px;text-align:center;margin:0 0 10px 0}
-table{width:100%;border-collapse:collapse;font-size:18px;background:#ffffff}
-th,td{border:1px solid #333;padding:6px 8px;text-align:center;white-space:nowrap}
-th{background:#C0C0C0}
+body{font-family:Arial;background:#ffffff;margin:0;padding:0}
+.wrapper{width:1100px;margin:12px auto;border:3px solid #000;background:#FFFFCC;padding:8px}
+h1{font-size:20px;text-align:center;margin:0 0 8px 0}
+
+/* make it fit */
+table{width:100%;border-collapse:collapse;font-size:11px;background:#ffffff;table-layout:fixed}
+th,td{border:1px solid #333;padding:2px 3px;text-align:center;overflow:hidden;text-overflow:ellipsis}
+
+/* headers */
+th{background:#C0C0C0;font-size:11px}
+
+/* numbers */
 td.num{text-align:right}
+
+/* blanks + highlights */
 td.blank{background:#000;color:#000}
 td.hit{background:#00FFFF}
+
+/* bottom rows */
 tr.totalrow td{background:#000;color:#000}
 tr.totalrow td.keep{background:#ffffff;color:#000;font-weight:bold}
+
+/* let PD columns wrap if needed instead of forcing one long line */
+td,th{white-space:normal}
 </style>
         """)
+
         out.write("</head><body><div class='wrapper'>")
         out.write(f"<h1>{esc(team_title)}</h1>")
 
