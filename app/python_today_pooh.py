@@ -20,7 +20,7 @@ BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-ba
 
 DRAFT_XLSX = os.path.join(os.path.dirname(__file__), "ByCoach.xlsx")  # must be in same folder
 
-# NEW: Team name mapping lives in docs/
+# Team name mapping lives in docs/
 TEAM_NAMES_XLSX = os.path.join(os.path.dirname(__file__), "..", "docs", "Team_Names.xlsx")
 
 HEADERS = {
@@ -99,58 +99,74 @@ def norm_name(name: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-def compute_pooh(values: List[str], labels: List[str]) -> Optional[dict]:
-    # Pooh = PTS + REB + AST + STL + BLK - missedFG - missedFT - TO
+def compute_line(values: List[str], labels: List[str]) -> Optional[dict]:
+    """
+    Parse a single ESPN player stat row and return all fields needed for:
+      - Pooh points
+      - FG% / 3PT% / FT%
+      - PF totals
+    Pooh = PTS + REB + AST + STL + BLK - missedFG - missedFT - TO
+    """
     if not labels or not values:
         return None
 
-    def idx(name: str) -> Optional[int]:
-        try:
-            return labels.index(name)
-        except ValueError:
-            return None
+    def idx(*names: str) -> Optional[int]:
+        for nm in names:
+            try:
+                return labels.index(nm)
+            except ValueError:
+                continue
+        return None
 
     i_min = idx("MIN")
     i_fg  = idx("FG")
+    i_3pt = idx("3PT", "3P")
     i_ft  = idx("FT")
     i_reb = idx("REB")
     i_ast = idx("AST")
     i_stl = idx("STL")
     i_blk = idx("BLK")
     i_to  = idx("TO")
+    i_pf  = idx("PF")
     i_pts = idx("PTS")
 
-    required = [i_min, i_fg, i_ft, i_reb, i_ast, i_stl, i_blk, i_to, i_pts]
+    required = [i_min, i_reb, i_ast, i_stl, i_blk, i_to]
     if any(x is None for x in required):
         return None
 
-    max_i = max(required)
+    max_i = max([x for x in required if x is not None] + [i_fg or 0, i_ft or 0, i_3pt or 0, i_pf or 0, i_pts or 0])
     if len(values) <= max_i:
         return None
 
-    mins = to_minutes(values[i_min])
-    fgm, fga = parse_made_attempt(values[i_fg])
-    ftm, fta = parse_made_attempt(values[i_ft])
+    mins = to_minutes(values[i_min]) if i_min is not None else 0.0
+
+    fgm, fga = parse_made_attempt(values[i_fg]) if i_fg is not None else (0, 0)
+    tpm, tpa = parse_made_attempt(values[i_3pt]) if i_3pt is not None else (0, 0)
+    ftm, fta = parse_made_attempt(values[i_ft]) if i_ft is not None else (0, 0)
+
+    pts = safe_int(values[i_pts]) if i_pts is not None else 0
+    reb = safe_int(values[i_reb]) if i_reb is not None else 0
+    ast = safe_int(values[i_ast]) if i_ast is not None else 0
+    stl = safe_int(values[i_stl]) if i_stl is not None else 0
+    blk = safe_int(values[i_blk]) if i_blk is not None else 0
+    tov = safe_int(values[i_to])  if i_to  is not None else 0
+    pf  = safe_int(values[i_pf])  if i_pf  is not None else 0
+
+    # Skip truly blank/DNP rows
+    if mins == 0 and pts == 0 and reb == 0 and ast == 0 and stl == 0 and blk == 0 and tov == 0 and pf == 0 and fga == 0 and fta == 0 and tpa == 0:
+        return None
 
     missed_fg = max(0, fga - fgm)
     missed_ft = max(0, fta - ftm)
-
-    pts = safe_int(values[i_pts])
-    reb = safe_int(values[i_reb])
-    ast = safe_int(values[i_ast])
-    stl = safe_int(values[i_stl])
-    blk = safe_int(values[i_blk])
-    tov = safe_int(values[i_to])
-
-    # Skip truly blank/DNP rows
-    if mins == 0 and pts == 0 and reb == 0 and ast == 0 and stl == 0 and blk == 0 and tov == 0 and fga == 0 and fta == 0:
-        return None
 
     pooh = (pts + reb + ast + stl + blk) - (missed_fg + missed_ft + tov)
 
     return {
         "MIN": mins,
-        "PTS": pts, "REB": reb, "AST": ast, "STL": stl, "BLK": blk, "TO": tov,
+        "PTS": pts, "REB": reb, "AST": ast, "STL": stl, "BLK": blk, "TO": tov, "PF": pf,
+        "FGM": fgm, "FGA": fga,
+        "3PM": tpm, "3PA": tpa,
+        "FTM": ftm, "FTA": fta,
         "POOH": pooh,
     }
 
@@ -159,7 +175,6 @@ def parse_yyyymmdd(s: str) -> datetime:
     if not re.fullmatch(r"\d{8}", s):
         raise ValueError("Date must be YYYYMMDD (8 digits).")
     dt = datetime.strptime(s, "%Y%m%d")
-    # Interpret as local date at midnight in America/Chicago
     return dt.replace(tzinfo=LOCAL_TZ)
 
 def fmt_yyyymmdd(dt: datetime) -> str:
@@ -182,10 +197,8 @@ def event_local_yyyymmdd(e: dict) -> str:
         dt = datetime.fromisoformat(iso)
     except Exception:
         return ""
-
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC_TZ)
-
     return dt.astimezone(LOCAL_TZ).strftime("%Y%m%d")
 
 
@@ -291,7 +304,6 @@ def load_draft_board(xlsx_path: str, team_map: Dict[str, str]) -> Tuple[Dict[str
 # SCOREBOARD (SEC DIRECT)
 # ----------------------------
 def get_sec_events(date_yyyymmdd: str) -> List[dict]:
-    # SEC = group 23
     url = f"{BASE}/scoreboard?dates={date_yyyymmdd}&groups=23&limit=500"
     data = get_json(url)
     events = data.get("events", []) or []
@@ -372,7 +384,7 @@ def get_boxscore_players(event_id: str) -> List[dict]:
                 if aid and aid in seen:
                     continue
 
-                line = compute_pooh(values, labels)
+                line = compute_line(values, labels)
                 if not line:
                     continue
 
@@ -389,7 +401,12 @@ def get_boxscore_players(event_id: str) -> List[dict]:
                     "stl": line["STL"],
                     "blk": line["BLK"],
                     "to":  line["TO"],
+                    "pf":  line["PF"],
                     "min": line["MIN"],
+                    # NEW: raw makes/attempts so Final snapshots can drive stat pages w/o ESPN
+                    "fgm": line["FGM"], "fga": line["FGA"],
+                    "3pm": line["3PM"], "3pa": line["3PA"],
+                    "ftm": line["FTM"], "fta": line["FTA"],
                 })
 
     return out
@@ -414,7 +431,11 @@ def write_xlsx(players_rows: List[dict], owner_totals_rows: List[dict], out_path
     ws1 = wb.active
     ws1.title = "Players"
 
-    headers1 = ["date","owner","started_today","player","team","game","status","pooh","pts","reb","ast","stl","blk","to","min"]
+    headers1 = [
+        "date","owner","started_today","player","team","game","status",
+        "pooh","pts","reb","ast","stl","blk","to","pf","min",
+        "fgm","fga","3pm","3pa","ftm","fta"
+    ]
     ws1.append(headers1)
     for c in range(1, len(headers1) + 1):
         ws1.cell(row=1, column=c).font = Font(bold=True)
@@ -442,7 +463,12 @@ def write_html_tables(players_rows, owner_totals_rows, out_players_html, out_own
     def esc(x):
         return html.escape("" if x is None else str(x))
 
-    players_cols = ["date","owner","started_today","player","team","game","status","pooh","pts","reb","ast","stl","blk","to","min"]
+    # NEW columns added at end
+    players_cols = [
+        "date","owner","started_today","player","team","game","status",
+        "pooh","pts","reb","ast","stl","blk","to","pf","min",
+        "fgm","fga","3pm","3pa","ftm","fta"
+    ]
 
     # Players page
     with open(out_players_html, "w", encoding="utf-8") as f:
@@ -506,7 +532,7 @@ def main():
     if is_final:
         title_str += " (FINAL snapshot)"
 
-    # NEW: Load Owner -> Team Name mapping (forward-only)
+    # Load Owner -> Team Name mapping (forward-only)
     team_map = load_team_name_map(TEAM_NAMES_XLSX)
     if team_map:
         print(f"Loaded Team_Names mapping entries: {len(team_map)}")
@@ -574,7 +600,11 @@ def main():
                     "stl": p["stl"],
                     "blk": p["blk"],
                     "to":  p["to"],
+                    "pf":  p["pf"],
                     "min": p["min"],
+                    "fgm": p["fgm"], "fga": p["fga"],
+                    "3pm": p["3pm"], "3pa": p["3pa"],
+                    "ftm": p["ftm"], "fta": p["fta"],
                 })
 
             print(f"  Players captured: {len(players)}\n")
