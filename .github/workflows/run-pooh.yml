@@ -153,24 +153,20 @@ jobs:
           echo "  docs/Final_Players_${PD}.html"
           echo "  docs/Final_Owners_${PD}.html"
 
-      - name: Build summaries (Final runs only, capped through PD)
+      - name: Build summary + stat + team pages (Final runs only, capped through PD)
         if: ${{ steps.params.outputs.run_mode == 'final' }}
         shell: bash
         run: |
           set -euo pipefail
           PD="$(cat pd_resolved.txt)"
-          echo "Building summaries capped through $PD"
+          echo "Building pages capped through $PD"
+
           python -u app/build_summary_to_date.py "$PD"
           python -u app/build_player_pooh_summary.py "$PD"
-
-      - name: Build stat pages from ESPN (Final runs only, capped through PD)
-        if: ${{ steps.params.outputs.run_mode == 'final' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          PD="$(cat pd_resolved.txt)"
-          echo "Building stat pages from ESPN capped through $PD"
           python -u app/build_stat_pages.py "$PD"
+
+          # NEW: team pages (creates docs/Teams/*.html)
+          python -u app/build_team_pages.py "$PD"
 
       - name: Build Schedule page (HTML)
         shell: bash
@@ -195,6 +191,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Stage everything under docs/ (includes today_* + Final_* + summaries + schedule + stat pages + team pages)
           git add docs/
 
           if [[ -z "$(git status --porcelain docs/)" ]]; then
