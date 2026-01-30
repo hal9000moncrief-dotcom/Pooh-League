@@ -22,6 +22,8 @@ DOCS_DIR  = os.path.join(REPO_ROOT, "docs")
 PD_XLSX      = os.path.join(APP_DIR, "PD.xlsx")
 ROSTERS_XLSX = os.path.join(APP_DIR, "rosters.xlsx")
 
+TEAM_NAMES_XLSX = os.path.join(DOCS_DIR, "Team_Names.xlsx")
+
 LOCAL_TZ = ZoneInfo("America/Chicago")
 UTC_TZ   = ZoneInfo("UTC")
 
@@ -126,6 +128,58 @@ def event_local_yyyymmdd(e: dict) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC_TZ)
     return dt.astimezone(LOCAL_TZ).strftime("%Y%m%d")
+
+
+# ----------------------------
+# Team name map (Owner -> Team Name)
+# ----------------------------
+def load_team_name_map() -> Dict[str, str]:
+    """
+    docs/Team_Names.xlsx
+      Column headers: Owner, Team Name
+      Owner = old name
+      Team Name = new display name
+    """
+    if not os.path.exists(TEAM_NAMES_XLSX):
+        print(f"NOTE: Missing {TEAM_NAMES_XLSX}. Team Name will display as-is.")
+        return {}
+
+    wb = load_workbook(TEAM_NAMES_XLSX, data_only=True)
+    ws = wb.active
+
+    headers = [("" if c.value is None else str(c.value).strip()) for c in ws[1]]
+    headers_l = [h.lower() for h in headers]
+
+    def col(name: str) -> Optional[int]:
+        n = name.lower()
+        if n in headers_l:
+            return headers_l.index(n) + 1
+        return None
+
+    c_owner = col("Owner")
+    c_team  = col("Team Name")
+    if not c_owner or not c_team:
+        raise SystemExit("ERROR: docs/Team_Names.xlsx must have headers: Owner, Team Name")
+
+    m: Dict[str, str] = {}
+    for r in range(2, ws.max_row + 1):
+        old = ws.cell(row=r, column=c_owner).value
+        new = ws.cell(row=r, column=c_team).value
+        old_s = "" if old is None else str(old).strip()
+        new_s = "" if new is None else str(new).strip()
+        if old_s and new_s:
+            m[old_s] = new_s
+
+    print(f"Loaded Team_Names mapping entries: {len(m)}")
+    return m
+
+def display_team_name(old_owner: str, team_map: Dict[str, str]) -> str:
+    s = (old_owner or "").strip()
+    if not s:
+        return s
+    if s == "Undrafted":
+        return s
+    return team_map.get(s, s)
 
 
 # ----------------------------
@@ -236,7 +290,7 @@ def load_pd_map(pd_xlsx: str) -> Dict[int, str]:
 
 
 # ----------------------------
-# Rosters loader (NOW includes Cost/Ht/Wt/Class/Pos)
+# Rosters loader (includes Cost/Height/Weight/Class/Pos)
 # ----------------------------
 def load_rosters(rosters_xlsx: str) -> Dict[str, dict]:
     if not os.path.exists(rosters_xlsx):
@@ -281,7 +335,7 @@ def load_rosters(rosters_xlsx: str) -> Dict[str, dict]:
         key = norm_name(name)
         out[key] = {
             "Name": name,
-            "Team Name": sval(r, c_owner),
+            "Team Name": sval(r, c_owner),  # old owner name
             "Team": sval(r, c_team),
             "Cost": sval(r, c_cost),
             "Height": sval(r, c_height),
@@ -499,6 +553,7 @@ def main():
             raise SystemExit("Usage: python app/build_stat_pages.py [PD7]")
         cap_pd = int(m.group(1))
 
+    team_map = load_team_name_map()
     pd_map = load_pd_map(PD_XLSX)
     rosters = load_rosters(ROSTERS_XLSX)
 
@@ -508,7 +563,7 @@ def main():
 
     totals_by_player = defaultdict(agg_empty)
     team_abbr_by_player: Dict[str, str] = {}
-    owner_by_player: Dict[str, str] = {}
+    owner_by_player: Dict[str, str] = {}  # WILL store display Team Name (mapped)
 
     for pd in range(1, max_pd + 1):
         if pd not in pd_map:
@@ -541,7 +596,8 @@ def main():
                     if p.get("team"):
                         team_abbr_by_player[key] = p["team"]
 
-                    owner_by_player[key] = rosters.get(key, {}).get("Team Name", "")
+                    old_owner = (rosters.get(key, {}) or {}).get("Team Name", "") or ""
+                    owner_by_player[key] = display_team_name(old_owner, team_map)
 
     def roster_name(k: str) -> str:
         return rosters.get(k, {}).get("Name", "")
