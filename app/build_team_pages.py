@@ -312,58 +312,67 @@ def classify_pos(pos: str) -> str:
         return "F"
     return ""
 
-
-def lineup_is_feasible(pos_classes: List[str]) -> bool:
-    """
-    Need a 5-man lineup that can be assigned to either:
-      - 3G + 2F  (GGGFF)
-      - 2G + 3F  (GGFFF)
-
-    pos_classes are in {"G","F","GF",""} ("" treated as GF).
-    """
-    pure_g = sum(1 for p in pos_classes if p == "G")
-    pure_f = sum(1 for p in pos_classes if p == "F")
-    flex   = sum(1 for p in pos_classes if p in ("GF", ""))
-
-    # Try target guard counts 2 or 3
-    for g_target in (2, 3):
-        f_target = 5 - g_target
-        if pure_g > g_target:
-            continue
-        if pure_f > f_target:
-            continue
-        # flex can fill gaps on either side
-        if pure_g + flex < g_target:
-            continue
-        if pure_f + flex < f_target:
-            continue
-        return True
-
-    return False
-
-
 def best_valid_lineup_sum(player_items: List[Tuple[int, str]]) -> int:
     """
-    player_items = [(pooh, pos_class), ...] for players who have a PD value.
-    Returns best sum among all 5-player combos meeting lineup constraint.
+    FAST DP version.
+    player_items = [(pooh, pos_class), ...]
+      pos_class in {"G","F","GF",""}   ("" treated as GF)
+
+    Need best 5-player sum where:
+      - guard count is 2 or 3  (GGFFF or GGGFF)
+      - equivalently: guards in {2,3} and forwards in {3,2}
+      - and therefore no more than 3 guards and no more than 3 forwards.
     """
     n = len(player_items)
     if n < 5:
         return 0
 
-    best = 0
+    NEG = -10**18
 
-    # brute force combos of 5 (rosters are small; fast)
-    from itertools import combinations
-    for combo in combinations(player_items, 5):
-        pos_classes = [pc for _, pc in combo]
-        if not lineup_is_feasible(pos_classes):
-            continue
-        s = sum(p for p, _ in combo)
-        if s > best:
-            best = s
+    # dp[picked][guards] = best sum achievable
+    dp = [[NEG] * 4 for _ in range(6)]
+    dp[0][0] = 0
 
-    return best
+    for pooh, pos_class in player_items:
+        pc = (pos_class or "")
+        if pc not in ("G", "F", "GF", ""):
+            pc = ""  # treat unknown as flex
+
+        # copy for "skip this player"
+        ndp = [row[:] for row in dp]
+
+        for picked in range(0, 5):
+            for guards in range(0, 4):
+                cur = dp[picked][guards]
+                if cur == NEG:
+                    continue
+
+                # current forwards chosen so far
+                fwd = picked - guards
+                if fwd < 0:
+                    continue
+
+                # --- take as Guard ---
+                if pc in ("G", "GF", ""):
+                    np = picked + 1
+                    ng = guards + 1
+                    if ng <= 3:  # <=3 guards always
+                        nf = np - ng
+                        if nf <= 3:  # <=3 forwards always
+                            ndp[np][ng] = max(ndp[np][ng], cur + pooh)
+
+                # --- take as Forward ---
+                if pc in ("F", "GF", ""):
+                    np = picked + 1
+                    ng = guards
+                    nf = np - ng
+                    if nf <= 3:  # <=3 forwards always
+                        ndp[np][ng] = max(ndp[np][ng], cur + pooh)
+
+        dp = ndp
+
+    best = max(dp[5][2], dp[5][3])
+    return 0 if best == NEG else int(best)
 
 
 # ----------------------------
