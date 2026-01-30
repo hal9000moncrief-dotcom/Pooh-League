@@ -68,11 +68,6 @@ def pd_num_from_players_filename(fn: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def pd_num_from_owners_filename(fn: str) -> Optional[int]:
-    m = re.search(r"Final_Owners_PD(\d+)\.html$", fn)
-    return int(m.group(1)) if m else None
-
-
 # ----------------------------
 # Team name mapping (Owner -> Team Name)
 # ----------------------------
@@ -174,15 +169,20 @@ def load_rosters() -> Dict[str, dict]:
 
 
 # ----------------------------
-# Parse Final_Players_PD*.html as “starter rows” + Pooh + stats totals
+# Parse Final_Players_PD*.html and detect "starter" via:
+#  - your older files: td class='start' OR started_today == Yes
+#  - your newer files: bold text (<b>/<strong>) in the row cells
 # ----------------------------
 def parse_final_players_pd_file(path: str) -> Tuple[List[str], List[dict]]:
     """
     Returns:
       headers_l
-      rows: list of dicts with keys including (when available):
+      rows: list of dicts with keys including:
         owner, started_today, player, pooh, pts, reb, ast, stl, blk, to, min
-      plus: __is_starter (bool) detected via started_today == Yes OR class='start' on TD.
+      plus: __is_starter (bool) detected via:
+        - started_today == Yes
+        - td class 'start'
+        - any <b> or <strong> within the row's td cells
     """
     with open(path, "r", encoding="utf-8") as f:
         soup = BeautifulSoup(f.read(), "html.parser")
@@ -197,14 +197,15 @@ def parse_final_players_pd_file(path: str) -> Tuple[List[str], List[dict]]:
     headers_l = [h.lower() for h in headers]
 
     rows_out: List[dict] = []
-    for tr in table.find_all("tr")[1:]:
+    trs = table.find_all("tr")
+    for tr in trs[1:]:
         tds = tr.find_all("td")
         if not tds:
             continue
 
-        # detect starter via CSS class used by your today/Final files:
-        # each TD in the starter row was written as <td class='start'>...</td>
+        # starter signals
         is_starter_by_css = any(("start" in (td.get("class") or [])) for td in tds)
+        is_starter_by_bold = any((td.find("b") is not None) or (td.find("strong") is not None) for td in tds)
 
         values = [td.get_text(strip=True) for td in tds]
         row = {}
@@ -215,7 +216,7 @@ def parse_final_players_pd_file(path: str) -> Tuple[List[str], List[dict]]:
         started_today_txt = (row.get("started_today") or row.get("started today") or "").strip().lower()
         is_starter_by_col = started_today_txt in ("yes", "y", "true", "1")
 
-        row["__is_starter"] = bool(is_starter_by_css or is_starter_by_col)
+        row["__is_starter"] = bool(is_starter_by_css or is_starter_by_col or is_starter_by_bold)
         rows_out.append(row)
 
     return headers_l, rows_out
@@ -228,7 +229,8 @@ def load_final_player_data_and_actuals(cap_pd: Optional[int], team_map_rev: Dict
       pooh_by_player_pd[player_norm][pd] = pooh
       agg_stats[player_norm] = totals across included PDs:
          games, min, pts, reb, ast, stl, blk, to
-      actual_by_owner_pd[owner_old][pd] = sum(starter pooh for that PD, read from Final_Players)
+      actual_by_owner_pd[owner_old][pd] = sum(starter pooh for that PD
+      starters_by_owner_pd[owner_old][pd] = set(player_norm) who were starters for that PD
     """
     files = []
     for fn in os.listdir(DOCS_DIR):
@@ -248,8 +250,7 @@ def load_final_player_data_and_actuals(cap_pd: Optional[int], team_map_rev: Dict
     pooh_by_player_pd: Dict[str, Dict[int, int]] = defaultdict(dict)
     agg = defaultdict(lambda: {"games": 0, "min": 0.0, "pts": 0, "reb": 0, "ast": 0, "stl": 0, "blk": 0, "to": 0})
     actual_by_owner_pd: Dict[str, Dict[int, int]] = defaultdict(dict)
-    starters_by_owner_pd: Dict[str, Dict[int, Set[str]]] = defaultdict(lambda: defaultdict(set))  # NEW
-
+    starters_by_owner_pd: Dict[str, Dict[int, Set[str]]] = defaultdict(lambda: defaultdict(set))
 
     for pd, fn in files:
         path = os.path.join(DOCS_DIR, fn)
@@ -257,14 +258,13 @@ def load_final_player_data_and_actuals(cap_pd: Optional[int], team_map_rev: Dict
         if not headers_l or not rows:
             continue
 
-        # map indices by header names (but we already returned dict rows)
         for r in rows:
             owner_raw = (r.get("owner") or "").strip()
             player = (r.get("player") or "").strip()
             if not owner_raw or not player:
                 continue
-            
-            # NEW: normalize owner to OLD owner name so PD1-7 (old) and PD8+ (new) both work
+
+            # Normalize "owner" back to OLD owner name (so PDs with new team names still map)
             owner = team_map_rev.get(owner_raw, owner_raw)
 
             key = norm_name(player)
@@ -274,7 +274,7 @@ def load_final_player_data_and_actuals(cap_pd: Optional[int], team_map_rev: Dict
             pooh = safe_int(r.get("pooh", 0))
             pooh_by_player_pd[key][pd] = pooh
 
-            # aggregate totals (player appeared in boxscore for that PD)
+            # aggregate totals
             agg[key]["games"] += 1
             agg[key]["min"] += safe_float(r.get("min", 0.0))
             agg[key]["pts"] += safe_int(r.get("pts", 0))
@@ -284,11 +284,10 @@ def load_final_player_data_and_actuals(cap_pd: Optional[int], team_map_rev: Dict
             agg[key]["blk"] += safe_int(r.get("blk", 0))
             agg[key]["to"]  += safe_int(r.get("to", 0))
 
-            # ACTUAL: starters only (bold)
+            # ACTUAL starters (bold / class / started_today)
             if r.get("__is_starter"):
                 actual_by_owner_pd[owner][pd] = actual_by_owner_pd[owner].get(pd, 0) + pooh
-                starters_by_owner_pd[owner][pd].add(key)  # NEW: track which players were actual starters
-
+                starters_by_owner_pd[owner][pd].add(key)
 
     return max_pd, pooh_by_player_pd, agg, actual_by_owner_pd, starters_by_owner_pd
 
@@ -302,7 +301,7 @@ def classify_pos(pos: str) -> str:
       "G"  = guard-only
       "F"  = forward/frontcourt-only (F or C)
       "GF" = flex (contains both G and F/C)
-      ""   = unknown (treat as flex to avoid excluding)
+      ""   = unknown (treat as flex)
     """
     p = (pos or "").upper().replace(" ", "")
     if not p:
@@ -319,16 +318,14 @@ def classify_pos(pos: str) -> str:
         return "F"
     return ""
 
+
 def best_valid_lineup_sum(player_items: List[Tuple[int, str]]) -> int:
     """
     FAST DP version.
     player_items = [(pooh, pos_class), ...]
       pos_class in {"G","F","GF",""}   ("" treated as GF)
 
-    Need best 5-player sum where:
-      - guard count is 2 or 3  (GGFFF or GGGFF)
-      - equivalently: guards in {2,3} and forwards in {3,2}
-      - and therefore no more than 3 guards and no more than 3 forwards.
+    Need best 5-player sum where guards in {2,3}.
     """
     n = len(player_items)
     if n < 5:
@@ -343,9 +340,8 @@ def best_valid_lineup_sum(player_items: List[Tuple[int, str]]) -> int:
     for pooh, pos_class in player_items:
         pc = (pos_class or "")
         if pc not in ("G", "F", "GF", ""):
-            pc = ""  # treat unknown as flex
+            pc = ""
 
-        # copy for "skip this player"
         ndp = [row[:] for row in dp]
 
         for picked in range(0, 5):
@@ -354,26 +350,21 @@ def best_valid_lineup_sum(player_items: List[Tuple[int, str]]) -> int:
                 if cur == NEG:
                     continue
 
-                # current forwards chosen so far
-                fwd = picked - guards
-                if fwd < 0:
-                    continue
-
-                # --- take as Guard ---
+                # take as Guard
                 if pc in ("G", "GF", ""):
                     np = picked + 1
                     ng = guards + 1
-                    if ng <= 3:  # <=3 guards always
+                    if ng <= 3:
                         nf = np - ng
-                        if nf <= 3:  # <=3 forwards always
+                        if nf <= 3:
                             ndp[np][ng] = max(ndp[np][ng], cur + pooh)
 
-                # --- take as Forward ---
+                # take as Forward
                 if pc in ("F", "GF", ""):
                     np = picked + 1
                     ng = guards
                     nf = np - ng
-                    if nf <= 3:  # <=3 forwards always
+                    if nf <= 3:
                         ndp[np][ng] = max(ndp[np][ng], cur + pooh)
 
         dp = ndp
@@ -406,6 +397,33 @@ def write_team_page(
     def esc(x) -> str:
         return html.escape("" if x is None else str(x))
 
+    # Column widths tuned to fit “one page wide” better
+    def col_width_px(c: str) -> int:
+        if c.isdigit():
+            return 28  # PD columns tight
+
+        widths = {
+            "Team Name": 70,
+            "Name": 140,
+            "Draft Order": 55,
+            "Cost": 45,
+            "Team": 45,
+            "Position": 45,
+            "Height": 45,
+            "Weight": 55,
+            "Class": 40,
+            "Min/G": 45,
+            "Total": 55,
+            "Avg": 45,
+            "PPG": 45,
+            "R/G": 45,
+            "A/G": 45,
+            "B/G": 45,
+            "S/G": 45,
+            "T/G": 45,
+        }
+        return widths.get(c, 45)
+
     with open(out_path, "w", encoding="utf-8") as out:
         out.write("<!doctype html><html><head><meta charset='utf-8'>")
         out.write(f"<title>{esc(team_title)}</title>")
@@ -415,35 +433,29 @@ body{font-family:Arial;background:#ffffff;margin:0;padding:0}
 .wrapper{width:1100px;margin:12px auto;border:3px solid #000;background:#FFFFCC;padding:8px}
 h1{font-size:20px;text-align:center;margin:0 0 8px 0}
 
-/* make it fit */
+/* fit on one page wide */
 table{width:100%;border-collapse:collapse;font-size:11px;background:#ffffff;table-layout:fixed}
-th,td{border:1px solid #333;padding:2px 3px;text-align:center;overflow:hidden;text-overflow:ellipsis}
-
-/* headers */
+th,td{border:1px solid #333;padding:2px 3px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 th{background:#C0C0C0;font-size:11px}
 
-/* numbers */
 td.num{text-align:right}
-
-/* blanks + highlights */
 td.blank{background:#000;color:#000}
 td.hit{background:#00FFFF}
 
-/* bottom rows */
 tr.totalrow td{background:#000;color:#000}
 tr.totalrow td.keep{background:#ffffff;color:#000;font-weight:bold}
-
-/* let PD columns wrap if needed instead of forcing one long line */
-td,th{white-space:normal}
 </style>
         """)
 
         out.write("</head><body><div class='wrapper'>")
         out.write(f"<h1>{esc(team_title)}</h1>")
 
-        out.write("<table><thead><tr>")
+        out.write("<table><colgroup>")
         for c in cols:
-            out.write(f"<th>{esc(c)}</th>")
+            out.write(f"<col style='width:{col_width_px(c)}px'>")
+        out.write("</colgroup><thead><tr>")
+        for c in cols:
+            out.write(f"<th title='{esc(c)}'>{esc(c)}</th>")
         out.write("</tr></thead><tbody>")
 
         # data rows
@@ -465,7 +477,7 @@ td,th{white-space:normal}
                 if c in {"Draft Order","Cost","Min/G","Total","Avg","PPG","R/G","A/G","B/G","S/G","T/G"}:
                     out.write(f"<td class='num'>{esc(v)}</td>")
                 else:
-                    out.write(f"<td>{esc(v)}</td>")
+                    out.write(f"<td title='{esc(v)}'>{esc(v)}</td>")
             out.write("</tr>")
 
         # Bottom: Actual row
@@ -508,14 +520,13 @@ def main():
     cap_pd = parse_cap_pd(sys.argv)
 
     team_map = load_team_name_map()
-    team_map_rev = {v: k for k, v in team_map.items()}  # NEW: Team Name -> Owner (old)
+    team_map_rev = {v: k for k, v in team_map.items()}  # Team Name -> Owner (old)
     rosters = load_rosters()
 
-    # Load player PD values + aggregates + ACTUAL starter totals from Final_Players
+    # Load player PD values + aggregates + ACTUAL starter totals + which starters they were
     max_pd, pooh_by_player_pd, agg, actual_by_owner_pd, starters_by_owner_pd = load_final_player_data_and_actuals(
         cap_pd, team_map_rev
     )
-
 
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -537,7 +548,7 @@ def main():
         tail_cols = ["PPG","R/G","A/G","B/G","S/G","T/G"]
         cols = fixed_cols + pd_cols + tail_cols
 
-         # PD highlight: ACTUAL starters per PD (bold rows from Final_Players)
+        # Highlight = ACTUAL starters per PD (from Final_Players bold rows)
         pd_highlight_cells: Dict[Tuple[int, str], bool] = {}
         for pd in range(1, max_pd + 1):
             starter_keys = starters_by_owner_pd.get(owner_old, {}).get(pd, set())
@@ -620,7 +631,6 @@ def main():
                     continue
                 pooh = int(pooh_by_player_pd[k][pd])
                 pos_class = classify_pos(rosters.get(k, {}).get("Position", ""))
-                # treat unknown as flex
                 items.append((pooh, pos_class))
             max_pd_sums[pd] = best_valid_lineup_sum(items)
 
@@ -635,8 +645,8 @@ def main():
             pd_highlight_cells=pd_highlight_cells,
             actual_pd=actual_pd,
             max_pd_sums=max_pd_sums,
-            total_actual=total_actual,
-            total_max=total_max,
+            total_actual=total_actual,  # Total column in "Actual" row
+            total_max=total_max,        # Total column in "Max" row
         )
 
 
